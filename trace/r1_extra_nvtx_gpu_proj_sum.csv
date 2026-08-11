@@ -1,0 +1,6 @@
+Range,Style,Total Proj Time (ns),Total Range Time (ns),Range Instances,Proj Avg (ns),Proj Med (ns),Proj Min (ns),Proj Max (ns),Proj StdDev (ns),Total GPU Ops,Avg GPU Ops,Avg Range Lvl,Avg Num Child
+:actor_actor_train_rollout_1,PushPop,12527863255,12984111926,2,6263931627.5,6263931627.5,6166079234,6361784021,138384182.0,8996,4498.0,0.0,2.5
+NCCL:ncclAllReduce,PushPop,1162970766,1394796899,378,3076642.2,36496.0,32128,894294669,45989403.2,1436,3.8,0.0,0.0
+NCCL:ncclAllGather,PushPop,7791743,363749,8,973967.9,6640.0,3936,7430464,2609971.7,8,1.0,0.0,0.0
+:nvte_rmsnorm_fwd,PushPop,33600,107355,5,6720.0,6720.0,6656,6816,59.9,5,1.0,1.0,0.0
+:nvte_rmsnorm_bwd,PushPop,32352,74993,1,32352.0,32352.0,32352,32352,0.0,2,2.0,0.0,0.0

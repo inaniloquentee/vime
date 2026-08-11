@@ -1,0 +1,383 @@
+\documentclass[11pt,a4paper]{ctexart}
+\usepackage[margin=1.9cm]{geometry}
+\usepackage{fontspec}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{tabularx}
+\usepackage{seqsplit}
+
+\setCJKmainfont{Noto Sans SC}
+\setmainfont{Arial}
+\setmonofont{Consolas}
+\hypersetup{colorlinks=true, linkcolor=blue!45!black, urlcolor=blue!45!black}
+\urlstyle{same}
+
+\definecolor{rlkblue}{HTML}{0F4C81}
+\definecolor{rlkgray}{HTML}{F4F6F8}
+\definecolor{rlkline}{HTML}{D9E2EC}
+\definecolor{rlktext}{HTML}{1F2933}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small Vime PR 核心文件与核心函数补充}
+\rhead{\small 2026-07-25}
+\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+\setlength{\headheight}{14pt}
+\setlist[itemize]{leftmargin=1.4em, itemsep=2pt, topsep=3pt}
+\setlist[description]{leftmargin=0pt, labelindent=0pt, style=nextline, itemsep=5pt}
+\titleformat{\section}{\Large\bfseries\color{rlkblue}}{}{0em}{}
+\titleformat{\subsection}{\large\bfseries\color{rlkblue}}{}{0em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\color{rlktext}}{}{0em}{}
+\renewcommand{\arraystretch}{1.18}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+\emergencystretch=2em
+
+\newcommand{\code}[1]{{\small\nolinkurl{#1}}}
+\newcommand{\pr}[1]{\href{https://github.com/RL-Align/vime/pull/#1}{\##1}}
+\newcommand{\fileitem}[2]{\item[\code{#1}] #2}
+
+\begin{document}
+
+\begin{center}
+  {\Huge\bfseries Vime PR 核心文件与核心函数补充}\\[6pt]
+  {\large 追加到《Vime 深度技术分析文档》的 PR 速查附录}\\[4pt]
+  {\small 来源：\url{https://github.com/RL-Align/vime/pulls}；分析时间：2026-07-25}
+\end{center}
+
+\section{说明}
+本附录补充当前 GitHub open PR 列表中的核心文件与核心函数，覆盖 \pr{4}、\pr{17}、\pr{18}、\pr{19}、\pr{27}、\pr{28}、\pr{32}、\pr{33}、\pr{34}。
+
+提炼口径如下：
+\begin{itemize}
+  \item PR 标题取自 GitHub PR 列表页面；代码事实取自本地 \code{rl-align} remote 的 \code{refs/pull/<n>/head} 与 \code{refs/pull/<n>/merge}。
+  \item 对堆叠 PR 按“PR 自身增量”归类：\pr{28} 基于 \pr{27}，\pr{32} 基于 \pr{28}，\pr{33} 基于 \pr{32}，\pr{34} 基于 \pr{33}。
+  \item \pr{27} 分支同时合入了 \pr{17}/\pr{18}/\pr{19} 的历史，因此本文在 \pr{27} 中只突出其 production telemetry 与 linear\_logp 接入本身，避免重复列前序 PR 的核心函数。
+  \item 测试文件只列关键覆盖面，不逐条展开全部 test case。
+\end{itemize}
+
+\section{PR 总览}
+\begin{longtable}{>{\raggedright\arraybackslash}p{1.0cm} >{\raggedright\arraybackslash}p{6.1cm} >{\raggedright\arraybackslash}p{7.2cm}}
+\toprule
+PR & 标题 & 核心作用 \\
+\midrule
+\endhead
+\pr{4} & Add RL-Kernel 8GPU runbook, metrics, and config support & 早期 RL-Kernel linear\_logp 集成、TP2/8GPU benchmark 配置、运行时计数器、CUDA event baseline timer 与长跑报告。\\
+\pr{17} & [Core] Add RL-Kernel execution decision records & 把“是否走 RL-Kernel、走哪个 backend、何时 fallback”抽象成可记录的 ExecutionDecision。\\
+\pr{18} & [Core] Add RL-Kernel consistency metadata fingerprints & 为 rollout sample 和训练 batch 注入一致性元数据、指纹、requested/actual provenance 与 batch layout fingerprint。\\
+\pr{19} & Add audit-only dlogp diagnostics & 增加 audit-only 的 dlogp 诊断，比较 old/ref/logp 路径并输出告警与统计指标。\\
+\pr{27} & [RL-Kernel] Productionize linear\_logp telemetry & 将 linear\_logp fast path 生产化：运行时 telemetry、backend/contract provenance、memory probe、训练指标上报。\\
+\pr{28} & [RL-Kernel] Add linear\_logp strict fallback checks & 为 strict fast 模式补齐输入/运行时/result blocker，失败时给出结构化原因而非静默 fallback。\\
+\pr{32} & [RL-Kernel] Add consistency audit harness & 构建 consistency audit harness，聚合 metadata validation、dlogp diagnostics、replay manifest 与 result cube。\\
+\pr{33} & [RL-Kernel] Add single-card operator comparison harness & 增加单卡 operator reference/comparison harness，覆盖确定性、batch invariance、forward chain 与 strict admission。\\
+\pr{34} & [RL-Kernel] Add distributed operator contract harness & 增加 distributed operator contract harness，并消费 RL-Kernel alignment standard 作为跨配置判定标准。\\
+\bottomrule
+\end{longtable}
+
+\section{阅读路径}
+\begin{itemize}
+  \item 只看 RL-Kernel fast path 主线：\pr{17} $\rightarrow$ \pr{27} $\rightarrow$ \pr{28}。
+  \item 只看 consistency/audit 主线：\pr{18} $\rightarrow$ \pr{19} $\rightarrow$ \pr{32}。
+  \item 只看算子对齐与验收主线：\pr{33} $\rightarrow$ \pr{34}。
+  \item 只看 8GPU benchmark 与运行手册：\pr{4}。
+\end{itemize}
+
+\newpage
+\section{\pr{4}: RL-Kernel 8GPU runbook, metrics, and config support}
+
+\subsection{核心文件}
+\begin{description}
+  \fileitem{vime/backends/megatron_utils/rl_kernel.py}{早期 RL-Kernel logp/linear\_logp fast path 封装，负责 operator 获取、fallback、TP vocab metadata、runtime counter 与 hidden-state 输出控制。}
+  \fileitem{vime/backends/megatron_utils/loss.py}{在 logprob 计算与 policy/value/SFT loss 中接入 RL-Kernel linear\_logp，必要时 materialize logits 作为 fallback。}
+  \fileitem{vime/backends/megatron_utils/model.py}{训练/推理 forward 路径控制 hidden states 返回，加入 baseline output layer probe 与训练指标汇总。}
+  \fileitem{vime/backends/megatron_utils/baseline_timer.py}{baseline 运行时计数与 CUDA event 计时统计，用来和 RL-Kernel fast path 做性能对照。}
+  \fileitem{vime/backends/megatron_utils/cuda_event_timer.py}{提供 \code{CudaEventTimerQueue}，异步收集 ready event 的 GPU elapsed time。}
+  \fileitem{vime/utils/rl_kernel.py}{解析 RL-Kernel ops、标准化 args、判断 op 是否启用。}
+  \fileitem{scripts/run-qwen3-30B-A3B.sh}{扩展 Qwen3-30B-A3B 训练脚本，增加 RL-Kernel、profile、8GPU/TP2 benchmark 相关开关。}
+  \fileitem{scripts/benchmarks/run-qwen3-30B-A3B-8gpu-rlk-12rollout.sh}{新增 8GPU 12-rollout benchmark runner。}
+  \fileitem{vime-RLK-8gpu-single-op-runbook.md / vime-RLK-long-run-practice-report.md}{记录 8GPU 单算子运行手册、指标矩阵、长跑实践结果。}
+\end{description}
+
+\subsection{核心函数与类}
+\begin{itemize}
+  \item \code{LinearLogpContext}: 保存 LM head weight、bias、TP group、vocab offset、global vocab size、sequence parallel 等 linear\_logp 所需上下文。
+  \item \code{maybe_compute_logp(...)} / \code{maybe_compute_linear_logp(...)}: 尝试调用 RL-Kernel op，失败或不满足条件时 fallback 到 Vime 原生路径。
+  \item \code{get_linear_logp_context_from_model(...)}: 从 Megatron model chunk 提取 LM head 与 TP vocab metadata。
+  \item \code{return_hidden_states_for_linear_logp(...)}: 临时调整 post\_process，让模型 forward 返回 hidden states 给 linear\_logp。
+  \item \code{should_use_linear_logp_model_output(...)} / \code{warn_linear_logp_fallback(...)}: 判定 fast path 是否可用，并记录 fallback。
+  \item \code{get_rl_kernel_runtime_counter_delta(...)} / \code{reset_rl_kernel_runtime_counters(...)}: 训练 step 级别读取/重置 RL-Kernel runtime counters。
+  \item \code{_gather_sequence_parallel_hidden_if_needed(...)}、\code{_materialize_linear_logits(...)}、\code{_policy_loss_needs_entropy(...)}: loss 侧把 hidden/logits/entropy 逻辑拆成可 fallback 的边界。
+  \item \code{CudaEventTimerQueue.enqueue(...)} / \code{flush_ready(...)}: 维护 CUDA event 队列并按 ready 状态落统计。
+  \item \code{baseline_linear_logp_timer_enabled(...)}、\code{record_baseline_output_layer_runtime(...)}、\code{queue_baseline_native_logprob_cuda_event(...)}: baseline 计时入口。
+  \item \code{parse_rl_kernel_ops(...)}、\code{normalize_rl_kernel_args(...)}、\code{is_rl_kernel_op_enabled(...)}: CLI/env 参数归一化。
+\end{itemize}
+
+\subsection{验证覆盖}
+\begin{itemize}
+  \item \code{tests/test_rl_kernel_linear_logp_integration.py}: linear\_logp 与 Vime response slicing、TP metadata、fallback、hidden detach、runtime counter 的集成测试。
+  \item \code{tests/test_rl_kernel_logp_integration.py}: selected logp fast path 与 fallback 行为。
+  \item \code{tests/test_cuda_event_timer.py}: CUDA event timer queue flush/clear 行为。
+  \item \code{tests/test_rl_kernel_args.py}: ops 解析、env enable、非法 op/布尔值校验。
+\end{itemize}
+
+\newpage
+\section{\pr{17}: RL-Kernel execution decision records}
+
+\subsection{核心文件}
+\begin{description}
+  \fileitem{vime/backends/rl_kernel_utils/execution.py}{新增 execution decision 层，把 capability、numeric contract、backend 选择、strict failure、native fallback 与日志记录统一建模。}
+  \fileitem{vime/backends/rl_kernel_utils/__init__.py}{导出 execution decision 相关类与 helper。}
+\end{description}
+
+\subsection{核心函数与类}
+\begin{itemize}
+  \item \code{FallbackReason}: 标准化 fallback reason code/message/details。
+  \item \code{NumericContract} / \code{LogprobContractMetadata}: 描述 logprob 数值契约和 dtype tolerance。
+  \item \code{BackendCapability} / \code{RlKernelCapabilities}: 表达 backend 是否支持某 operator、dtype、contract。
+  \item \code{CapabilityQueryResult}: 封装 capability query 成功/失败及错误信息。
+  \item \code{ExecutionDecision}: 最终决策记录，包含 operator、stage、requested/actual backend、fallback、contract、parallel context 等字段。
+  \item \code{query_rl_kernel_capabilities(...)}: 查询 RL-Kernel provider 的能力并归一化。
+  \item \code{select_execution_decision(...)}: 根据 mode、requested backend、capability 与 strict 规则选择执行路径。
+  \item \code{build_logprob_contract_decision(...)}: 为 logprob 类算子构造 contract-aware decision。
+  \item \code{emit_execution_decision(...)}: 把 decision 输出为结构化日志记录。
+\end{itemize}
+
+\subsection{验证覆盖}
+\begin{itemize}
+  \item \code{tests/utils/test_rl_kernel_execution.py}: capability normalization、backend 过滤、strict failure、native fallback、contract decision 与日志字段。
+\end{itemize}
+
+\section{\pr{18}: RL-Kernel consistency metadata fingerprints}
+
+\subsection{核心文件}
+\begin{description}
+  \fileitem{vime/utils/consistency_metadata.py}{一致性元数据的主模块，负责 fingerprint、requested/actual provenance、active token 统计、sample validation 与 batch layout fingerprint。}
+  \fileitem{vime/rollout/vllm_rollout.py}{在 rollout 生成、custom generate、dynamic sampling/filter 后给 sample 标注 consistency metadata。}
+  \fileitem{vime/ray/rollout.py}{在 \code{RolloutManager} 转训练数据与 DP split 时收集 metadata validation 和 layout fingerprints。}
+  \fileitem{vime/utils/types.py}{为 \code{Sample} 增加 \code{consistency_metadata} 字段。}
+\end{description}
+
+\subsection{核心函数与类}
+\begin{itemize}
+  \item \code{ConsistencyMetadataIssue} / \code{ConsistencyMetadataValidation}: validation issue 与整体校验结果。
+  \item \code{stable_fingerprint(...)}: 对元数据做稳定 JSON 归一化并生成 fingerprint。
+  \item \code{get_consistency_mode(...)}: 从 args/env 解析 off/audit/strict 模式。
+  \item \code{count_active_tokens(...)}: 基于 loss mask 与 response length 统计训练有效 token。
+  \item \code{build_requested_actual_provenance(...)}: 记录请求配置与实际运行 backend/model/sampling provenance。
+  \item \code{build_rollout_consistency_metadata(...)} / \code{ensure_sample_consistency_metadata(...)}: 构造并写入 sample metadata。
+  \item \code{validate_samples_consistency_metadata(...)} / \code{raise_for_consistency_metadata_failures(...)}: 对 sample 级 metadata 做 audit/strict 校验。
+  \item \code{build_batch_layout_fingerprints(...)}: 记录 partitions、micro-batch index、global batch sizes 等 batch layout 指纹。
+  \item \code{_annotate_consistency_metadata(...)} / \code{_record_dynamic_sampling_decision(...)}: rollout 侧写入 source、sampling params、dynamic sampling decision。
+\end{itemize}
+
+\subsection{验证覆盖}
+\begin{itemize}
+  \item \code{tests/utils/test_consistency_metadata.py}: fingerprint 稳定性、metadata 构造、validation、active token 统计。
+  \item \code{tests/utils/test_consistency_metadata_rollout_integration.py}: rollout 侧 metadata 注入与动态采样标注。
+  \item \code{tests/test_sample.py}: \code{Sample} 新字段兼容性。
+\end{itemize}
+
+\newpage
+\section{\pr{19}: audit-only dlogp diagnostics}
+
+\subsection{核心文件}
+\begin{description}
+  \fileitem{vime/utils/dlogp_diagnostics.py}{新增 dlogp audit 诊断模块，计算 actor-old/ref/reference-logprob 差异、活跃 token 统计、告警与 metrics。}
+  \fileitem{vime/backends/megatron_utils/loss.py}{在 \code{policy_loss_function} 中按 audit 开关调用 \code{compute_dlogp_diagnostics} 并把结果写入 reported loss。}
+  \fileitem{vime/utils/arguments.py}{增加 consistency/audit 相关 CLI 参数入口。}
+  \fileitem{vime/backends/megatron_utils/data.py / vime/ray/rollout.py}{把 rollout metadata 继续带入训练数据与日志链路。}
+\end{description}
+
+\subsection{核心函数与类}
+\begin{itemize}
+  \item \code{DlogpAuditWarning}: 表达 dlogp 诊断中的 warning code、message、sample index 与 metadata。
+  \item \code{DlogpAuditReport}: 汇总 metrics 与 warnings。
+  \item \code{get_rlk_consistency_mode(...)}: 兼容 args/env 的 off/audit/strict 读取。
+  \item \code{is_dlogp_audit_enabled(...)}: 判定是否进入 audit-only 诊断。
+  \item \code{compute_dlogp_diagnostics(...)}: 核心诊断函数，计算 dlogp 分布、非数值/长度/metadata 缺失告警与活跃 token 指标。
+  \item \code{policy_loss_function(...)}: 在 policy loss 上报中合并 \code{dlogp_audit_metrics}。
+\end{itemize}
+
+\subsection{验证覆盖}
+\begin{itemize}
+  \item \code{tests/utils/test_dlogp_diagnostics.py}: audit 开关、指标计算、warning 分类、metadata fallback、device/dtype 处理。
+\end{itemize}
+
+\section{\pr{27}: Productionize linear\_logp telemetry}
+
+\subsection{核心文件}
+\begin{description}
+  \fileitem{vime/backends/megatron_utils/rl_kernel.py}{把 linear\_logp fast path 从功能验证推进到生产 telemetry：runtime metadata、support matrix、backend/contract provenance、memory probe、指标化 counter。}
+  \fileitem{vime/backends/megatron_utils/model.py}{在 \code{forward_only} 与 \code{train} 路径收集 linear\_logp context、返回 hidden states，并把 runtime delta/metadata 写入训练指标。}
+  \fileitem{vime/backends/megatron_utils/loss.py}{统一 hidden/logits flatten、sequence parallel gather、temperature scaling、entropy/fallback 逻辑。}
+  \fileitem{vime/backends/rl_kernel_utils/adapter.py}{把 registry op 的 backend id、contract id、provenance 透传给 Megatron telemetry。}
+  \fileitem{vime/utils/rl_kernel.py}{提供 fast/strict/op enabled 的轻量判断 helper。}
+  \fileitem{docs/en/advanced/rl-kernel-linear-logp.md}{新增 linear\_logp 使用与 telemetry 文档。}
+\end{description}
+
+\subsection{核心函数与类}
+\begin{itemize}
+  \item \code{LinearLogpRuntimeMetadata}: 记录 requested backend、actual backend、contract、fallback、memory probe 与 decision fields。
+  \item \code{_emit_linear_logp_decision(...)}: 生成结构化 \code{ExecutionDecision}。
+  \item \code{_set_linear_logp_selected_backend(...)} / \code{_set_linear_logp_zero_token_decision(...)}: 记录优化路径与零 token 特例。
+  \item \code{get_linear_logp_support_matrix(...)} / \code{get_linear_logp_runtime_metadata(...)} / \code{get_linear_logp_runtime_log_metrics(...)}: 对外暴露 support 与 telemetry。
+  \item \code{maybe_compute_linear_logp(...)}: fast path 主入口，负责 adapter 调用、temperature、hidden detach、bf16 cast、memory probe、fallback 结果处理。
+  \item \code{_forward_only_should_return_hidden_for_linear_logp(...)} / \code{_train_should_return_hidden_for_linear_logp(...)}: 决定训练/评估 forward 是否改走 hidden-state 输出。
+  \item \code{get_log_probs_and_entropy(...)}: 接收 \code{rl_kernel_linear_logp_context}，在必要时选择 fast path 或原生 logits path。
+  \item \code{_op_text_attr(...)}: 从 RL-Kernel op 提取 backend/contract 文本属性。
+\end{itemize}
+
+\subsection{验证覆盖}
+\begin{itemize}
+  \item \code{tests/test_rl_kernel_linear_logp_integration.py}: telemetry、backend provenance、hidden slicing、fallback 与 metric delta。
+\end{itemize}
+
+\newpage
+\section{\pr{28}: linear\_logp strict fallback checks}
+
+\subsection{核心文件}
+\begin{description}
+  \fileitem{vime/backends/megatron_utils/rl_kernel.py}{新增 strict fallback blocker 体系，明确区分 runtime blocker、input blocker、result blocker 与 strict failure。}
+  \fileitem{vime/backends/megatron_utils/loss.py}{向 fast path 传递 \code{loss_masks} 与 \code{response_lengths}，使 active-token 与 mask 校验具备完整输入。}
+  \fileitem{vime/backends/megatron_utils/model.py}{配合 strict 检查调整 hidden-state 返回和 post-process 逻辑。}
+  \fileitem{docs/en/advanced/rl-kernel-linear-logp.md}{补充 strict fallback 检查说明。}
+\end{description}
+
+\subsection{核心函数与类}
+\begin{itemize}
+  \item \code{_LinearLogpUnavailable}: 结构化不可用原因，包含 code、message、details。
+  \item \code{_unavailable(...)}: 构造标准 blocker。
+  \item \code{_set_linear_logp_unavailable(...)}: strict 模式下记录 strict-failure，不把失败伪装成正常 fallback。
+  \item \code{_handle_linear_logp_unavailable(...)}: 根据 auto/strict 策略选择 warning fallback 或抛错。
+  \item \code{_linear_logp_runtime_blocker(...)}: 检查 entropy、context parallel、qkv format、rollout temperature 等运行时限制。
+  \item \code{_active_mask_blocker(...)}: 检查 loss mask/response length 的数量、形状、长度和 active token 合法性。
+  \item \code{_linear_logp_input_blocker(...)}: 检查 hidden/weight/bias/target 的 shape、dtype、device、vocab range 和 TP metadata。
+  \item \code{_linear_logp_result_blocker(...)}: 校验 RL-Kernel 返回值的 tensor 类型与 token 数。
+  \item \code{maybe_compute_linear_logp(...)}: 串联 runtime/input/result blocker，并在 strict 模式下输出可追踪失败。
+\end{itemize}
+
+\subsection{验证覆盖}
+\begin{itemize}
+  \item \code{tests/test_rl_kernel_linear_logp_integration.py}: 新增 strict fallback/failure、mask、shape、dtype、device、vocab range 与 result 校验覆盖。
+\end{itemize}
+
+\section{\pr{32}: consistency audit harness}
+
+\subsection{核心文件}
+\begin{description}
+  \fileitem{vime/utils/consistency_audit.py}{新增 consistency audit harness，聚合 metadata validation、dlogp diagnostics、replay manifest、batch invariance cases 与 result cube。}
+  \fileitem{vime/ray/rollout.py}{在 \code{RolloutManager} 训练数据转换与 DP split 中挂接 replay manifest。}
+  \fileitem{vime/backends/megatron_utils/loss.py}{把 dlogp/audit 结果与训练 batch metadata 结合，形成训练侧 audit 输出。}
+  \fileitem{tests/_unit_stubs.py}{补齐 audit 测试所需的轻量 stub。}
+\end{description}
+
+\subsection{核心函数与类}
+\begin{itemize}
+  \item \code{ConsistencyAuditResult}: audit 主结果对象，包含 validation、diagnostic metadata、manifest、result cube、bookkeeping metrics。
+  \item \code{run_consistency_audit(...)}: audit 主入口，整合 metadata validation 与 dlogp report。
+  \item \code{validate_consistency_audit_batch(...)}: 检查训练 batch 是否携带 audit/strict 所需字段。
+  \item \code{build_consistency_diagnostic_metadata(...)}: 从 batch 抽取 sample 级 diagnostic metadata。
+  \item \code{build_consistency_replay_manifest(...)}: 生成可复现 replay 所需的 sample/layout/provenance manifest。
+  \item \code{build_batch_invariance_replay_cases(...)}: 构造 batch/layout invariance 的 replay case。
+  \item \code{build_consistency_result_cube(...)}: 按数据源、dtype、parallel axis、fallback 等维度组织结果。
+  \item \code{_with_audit_required_metadata_issues(...)} / \code{_with_runtime_provenance_issues(...)}: 补充 audit 必填 metadata 与 runtime provenance 问题。
+\end{itemize}
+
+\subsection{验证覆盖}
+\begin{itemize}
+  \item \code{tests/utils/test_consistency_audit.py}: audit result、batch validation、manifest、result cube、bookkeeping metrics。
+  \item \code{tests/utils/test_consistency_metadata.py} 与 \code{tests/utils/test_dlogp_diagnostics.py}: 配合新增 audit 入口扩展验证。
+\end{itemize}
+
+\newpage
+\section{\pr{33}: single-card operator comparison harness}
+
+\subsection{核心文件}
+\begin{description}
+  \fileitem{vime/backends/rl_kernel_utils/operator_comparison.py}{单卡 operator reference/comparison harness，提供 reference implementations、误差指标、batch invariance、forward chain 与 strict backend admission。}
+  \fileitem{vime/backends/rl_kernel_utils/__init__.py}{导出 operator comparison 相关数据结构与函数。}
+  \fileitem{vime/utils/consistency_audit.py}{把 operator comparison 的 replay/batch invariance 结果纳入 consistency audit。}
+\end{description}
+
+\subsection{核心函数与类}
+\begin{itemize}
+  \item \code{OperatorTolerance} / \code{OperatorComparisonSpec}: 定义每个 operator 的误差阈值、输入名、输出名与支持状态。
+  \item \code{OperatorComparisonResult}: 记录 max/mean/p95/active-dlogp 等误差指标和 pass/fail。
+  \item \code{OperatorPair}: 绑定 reference function 与 candidate function。
+  \item \code{ForwardChainStep} / \code{ForwardChainComparisonResult}: 描述多算子 forward chain 对比。
+  \item \code{BatchInvarianceCase}: 表达 batch size、layout、sample position 等 invariance case。
+  \item \code{StrictBackendAdmissionReport}: 汇总 strict backend 是否可进入 fast path。
+  \item \code{reference_attention(...)}、\code{reference_matmul_projection(...)}、\code{reference_lm_head(...)}、\code{reference_selected_logprobs(...)}、\code{reference_linear_logp(...)}、\code{reference_rmsnorm(...)}、\code{reference_rope(...)}、\code{reference_ratio_kl(...)}、\code{reference_ppo_fragment(...)}: 单卡 reference operator 集合。
+  \item \code{iter_operator_comparison_specs(...)} / \code{get_operator_comparison_spec(...)} / \code{run_reference_operator(...)}: spec 与 reference 调度。
+  \item \code{compare_operator_pair(...)} / \code{compare_operator_outputs(...)}: 核心误差比较入口。
+  \item \code{run_forward_chain_comparison(...)} / \code{compare_batch_invariance(...)} / \code{run_deterministic_repeatability_check(...)} / \code{build_strict_backend_admission_report(...)}: chain、batch、repeatability 与 strict admission 验收入口。
+\end{itemize}
+
+\subsection{验证覆盖}
+\begin{itemize}
+  \item \code{tests/test_rl_kernel_operator_comparison.py}: reference operator、pair comparison、active dlogp、forward chain、batch invariance、determinism、strict admission。
+\end{itemize}
+
+\section{\pr{34}: distributed operator contract harness}
+
+\subsection{核心文件}
+\begin{description}
+  \fileitem{vime/backends/rl_kernel_utils/distributed_contracts.py}{分布式 operator contract harness，覆盖 TP matmul projection、SP RMSNorm、CP attention、linear\_logp cross-config、batch invariance 与 drift 分类。}
+  \fileitem{vime/backends/rl_kernel_utils/standard.py}{适配 RL-Kernel alignment standard，提供 profile、score artifact 与 score record comparator。}
+  \fileitem{vime/backends/rl_kernel_utils/__init__.py}{导出 distributed contract 与 standard adapter API。}
+\end{description}
+
+\subsection{核心函数与类}
+\begin{itemize}
+  \item \code{DistributedContract}: 描述 operator、parallel axis、dtype、reference path、fallback policy、tolerance profile 等分布式契约。
+  \item \code{DistributedProvenance}: 比较 requested/actual 分布式 provenance 并识别 undeclared fallback。
+  \item \code{DistributedComparisonCase} / \code{DistributedComparisonReport} / \code{DistributedSweepReport}: 表达单个 case、单次报告与 sweep 报告。
+  \item \code{DistributedBatchInvarianceCase}: 表达分布式 batch/layout invariance case。
+  \item \code{distributed_gate_for_operator(...)}: 在没有 reference path 或不满足 single-card/profile 要求时阻断 candidate 执行。
+  \item \code{run_distributed_comparison_case(...)} / \code{run_distributed_drift_sweep(...)} / \code{select_smallest_passing_profile(...)}: 分布式对比与 profile 选择入口。
+  \item \code{classify_distributed_drift(...)}: 把 drift 归因到 parallel axis、dtype、fallback、layout 等维度。
+  \item \code{compare_tensor_parallel_matmul_projection(...)}、\code{compare_sequence_parallel_rmsnorm(...)}、\code{compare_context_parallel_attention(...)}、\code{compare_linear_logp_cross_config(...)}: 四类核心分布式算子/路径对比。
+  \item \code{build_distributed_contract_from_runtime_metadata(...)}: 从运行时 metadata 反推出 distributed contract。
+  \item \code{AlignmentProfile} / \code{AlignmentStandard}: RL-Kernel 对齐标准与 profile 表达。
+  \item \code{load_alignment_standard(...)} / \code{iter_alignment_profiles(...)} / \code{select_least_restrictive_passing_profile(...)}: 加载和选择标准 profile。
+  \item \code{build_standard_score_artifact(...)} / \code{compare_standard_score_records(...)}: 生成/比较符合 RL-Kernel schema 的 score 记录。
+\end{itemize}
+
+\subsection{验证覆盖}
+\begin{itemize}
+  \item \code{tests/test_rl_kernel_distributed_contracts.py}: gate、TP/SP/CP/linear\_logp cross-config、sweep、provenance 与 metadata contract。
+  \item \code{tests/test_rl_kernel_standard_adapter.py}: alignment standard provider、score artifact schema 与 score record comparator。
+\end{itemize}
+
+\section{核心文件索引}
+\begin{longtable}{>{\raggedright\arraybackslash}p{7.3cm} >{\raggedright\arraybackslash}p{7.0cm}}
+\toprule
+文件 & 关注的 PR / 主要职责 \\
+\midrule
+\endhead
+\code{vime/backends/megatron_utils/rl_kernel.py} & \pr{4}, \pr{27}, \pr{28}: linear\_logp fast path、telemetry、strict blocker。\\
+\code{vime/backends/megatron_utils/loss.py} & \pr{4}, \pr{19}, \pr{27}, \pr{28}, \pr{32}: logprob/loss 接入、dlogp audit、fast path fallback。\\
+\code{vime/backends/megatron_utils/model.py} & \pr{4}, \pr{27}, \pr{28}: hidden-state forward、训练指标、runtime metadata。\\
+\code{vime/backends/rl_kernel_utils/execution.py} & \pr{17}: capability、contract、execution decision。\\
+\code{vime/utils/consistency_metadata.py} & \pr{18}: sample/batch metadata、fingerprint、validation。\\
+\code{vime/utils/dlogp_diagnostics.py} & \pr{19}: audit-only dlogp diagnostics。\\
+\code{vime/utils/consistency_audit.py} & \pr{32}, \pr{33}: consistency audit、replay manifest、result cube、operator comparison 接入。\\
+\code{vime/backends/rl_kernel_utils/operator_comparison.py} & \pr{33}: single-card reference/comparison harness。\\
+\code{vime/backends/rl_kernel_utils/distributed_contracts.py} & \pr{34}: distributed contract、cross-config drift、batch invariance。\\
+\code{vime/backends/rl_kernel_utils/standard.py} & \pr{34}: RL-Kernel alignment standard adapter。\\
+\code{vime/rollout/vllm_rollout.py} / \code{vime/ray/rollout.py} & \pr{18}, \pr{32}: rollout metadata 注入、train data metadata、replay manifest。\\
+\code{scripts/benchmarks/run-qwen3-30B-A3B-8gpu-rlk-12rollout.sh} & \pr{4}: 8GPU benchmark runner。\\
+\bottomrule
+\end{longtable}
+
+\section{结论}
+这些 PR 把原文档中已经覆盖的 Vime 训练/rollout/weight sync 主链路继续向 RL-Kernel 方向扩展：先建立 execution decision 与 consistency metadata，再让 linear\_logp fast path 具备可观测 telemetry 和 strict fallback 检查，最后用 audit harness、single-card comparison 与 distributed contract harness 形成从单算子到跨配置的验收闭环。
+
+\end{document}
