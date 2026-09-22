@@ -144,7 +144,12 @@ def build_dp_schedule(
     else:
         step_sizes = [global_batch_size] * (len(rollout_ids) // global_batch_size)
 
-    assert step_sizes and all(step_size > 0 for step_size in step_sizes), "no valid optimizer step"
+    if not step_sizes:
+        raise AssertionError(
+            f"num_rollouts ({len(rollout_ids)}) < global_batch_size ({global_batch_size}); "
+            f"need at least one rollout per step."
+        )
+    assert all(step_size > 0 for step_size in step_sizes), "global batch sizes must be positive"
 
     partitions: list[list[int]] = [[] for _ in range(dp_size)]
     micro_batch_indices: list[list[list[int]]] = [[] for _ in range(dp_size)]
