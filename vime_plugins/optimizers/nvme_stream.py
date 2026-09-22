@@ -599,7 +599,8 @@ def setup_muon_state_on_disk(args) -> None:
 
 
 def _state_dir_root(args) -> str:
-    return os.path.join(args.offload_train_disk_dir, "optimizer_state")
+    role = getattr(args, "_vime_nvme_role", "actor")
+    return os.path.join(args.offload_train_disk_dir, role, "optimizer_state")
 
 
 def _purge_rank_dir(dir_root: str) -> str:
