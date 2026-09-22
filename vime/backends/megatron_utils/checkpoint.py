@@ -5,7 +5,7 @@ from pathlib import Path
 
 # TODO: may need to copy those 2 functions and do refactoring.
 from megatron.training.checkpointing import load_checkpoint as _load_checkpoint_megatron
-from megatron.training.checkpointing import save_checkpoint
+from megatron.training.checkpointing import save_checkpoint as _save_checkpoint_megatron
 from megatron.training.global_vars import get_args
 
 try:
@@ -92,6 +92,63 @@ logger = logging.getLogger(__name__)
 __all__ = ["save_checkpoint"]
 
 
+def _nvme_stores(optimizer):
+    if optimizer is None:
+        return []
+    stores = []
+    for item in getattr(optimizer, "chained_optimizers", [optimizer]):
+        store = getattr(item, "_nvme_state_store", None)
+        if store is not None:
+            stores.append(store)
+    return stores
+
+
+def _checkpoint_base(path, iteration):
+    if path is None or iteration is None or iteration < 0:
+        return None
+    path = str(path)
+    if Path(path).name == f"iter_{iteration:07d}":
+        return path
+    try:
+        from megatron.training.checkpointing import get_checkpoint_name
+        return get_checkpoint_name(path, iteration, release=False, return_base_dir=True)
+    except (ImportError, TypeError):
+        return os.path.join(path, f"iter_{iteration:07d}")
+
+
+def save_checkpoint(
+    iteration,
+    model,
+    optimizer,
+    opt_param_scheduler,
+    num_floating_point_operations_so_far=0,
+    checkpointing_context=None,
+    train_data_iterator=None,
+    preprocess_common_state_dict_fn=None,
+    **kwargs,
+):
+    result = _save_checkpoint_megatron(
+        iteration,
+        model,
+        optimizer,
+        opt_param_scheduler,
+        num_floating_point_operations_so_far=num_floating_point_operations_so_far,
+        checkpointing_context=checkpointing_context,
+        train_data_iterator=train_data_iterator,
+        preprocess_common_state_dict_fn=preprocess_common_state_dict_fn,
+        **kwargs,
+    )
+    args = get_args()
+    stores = _nvme_stores(optimizer)
+    if stores and not getattr(args, "no_save_optim", False):
+        base = _checkpoint_base(getattr(args, "save", None), iteration)
+        if base is None:
+            raise ValueError("NVMe optimizer streaming requires --save for optimizer checkpoints")
+        for store in stores:
+            store.save_to(base)
+    return result
+
+
 def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_context):
     # ref: how megatron `load_checkpoint` gets directory
     args = get_args()
@@ -102,13 +159,23 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
     ), f"{args.load=} does not exist or is an empty directory. Did you specify the wrong folder?"
 
     if _is_megatron_checkpoint(load_path):
-        return _load_checkpoint_megatron(
+        result = _load_checkpoint_megatron(
             ddp_model=ddp_model,
             optimizer=optimizer,
             opt_param_scheduler=opt_param_scheduler,
             checkpointing_context=checkpointing_context,
             skip_load_to_model_and_opt=False,
         )
+        stores = _nvme_stores(optimizer)
+        if stores and result[0] is not None:
+            base = _checkpoint_base(load_path, result[0])
+            loaded = [store.load_from(base) for store in stores]
+            if any(loaded):
+                # The model shard has already been restored by Megatron. Restore the
+                # checkpointed FP32 mains directly so their extra precision survives.
+                for store in stores:
+                    store.restore_main_to_model_params()
+        return result
     else:
         return _load_checkpoint_hf(
             ddp_model=ddp_model,
