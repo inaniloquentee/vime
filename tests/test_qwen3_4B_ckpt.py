@@ -14,8 +14,8 @@ NUM_GPUS = 8
 
 parser = ArgumentParser()
 parser.add_argument("--async-save", action="store_true", help="Whether to test async save/load.")
-parser.add_argument("--save-optimizer", choices=["cpu", "gpu"], default="cpu", help="Optimizer placement for save.")
-parser.add_argument("--load-optimizer", choices=["cpu", "gpu"], default="cpu", help="Optimizer placement for load.")
+parser.add_argument("--save-optimizer", choices=["cpu", "gpu", "nvme"], default="cpu", help="Optimizer placement for save.")
+parser.add_argument("--load-optimizer", choices=["cpu", "gpu", "nvme"], default="cpu", help="Optimizer placement for load.")
 parser.add_argument("--checkpoint-dir", default=None, help="Directory used for the save/load checkpoint roundtrip.")
 
 
@@ -36,7 +36,7 @@ def prepare(checkpoint_dir: str):
     )
 
 
-def optimizer_args(optimizer: str):
+def optimizer_args(optimizer: str, checkpoint_dir: str):
     args = (
         "--optimizer adam "
         "--lr 1e-6 "
@@ -44,10 +44,20 @@ def optimizer_args(optimizer: str):
         "--weight-decay 0.1 "
         "--adam-beta1 0.9 "
         "--adam-beta2 0.98 "
-        "--use-precision-aware-optimizer "
     )
     if optimizer == "cpu":
+        args += "--use-precision-aware-optimizer "
         args += "--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d "
+    elif optimizer == "gpu":
+        args += "--use-precision-aware-optimizer "
+    elif optimizer == "nvme":
+        nvme_dir = quote(f"{checkpoint_dir}_nvme_scratch")
+        args += (
+            "--stream-optimizer-state-to-disk "
+            f"--offload-train-disk-dir {nvme_dir} "
+            "--offload-train-disk-chunk-mb 64 "
+            "--stream-optimizer-state-moment-dtype fp32 "
+        )
     return args
 
 
@@ -72,12 +82,13 @@ def execute(mode: str = "", optimizer: str = "cpu", checkpoint_dir: str = ""):
         "--apply-chat-template "
         "--rollout-shuffle "
         "--rm-type deepscaler "
-        "--num-rollout 2 "
-        "--rollout-batch-size 4 "
-        "--n-samples-per-prompt 4 "
+        "--num-rollout 3 "
+        "--rollout-batch-size 8 "
+        "--n-samples-per-prompt 2 "
         "--rollout-max-response-len 1024 "
         "--rollout-temperature 0.8 "
         "--global-batch-size 16 "
+        "--variable-global-batch-size "
         "--balance-data "
     )
 
@@ -125,7 +136,7 @@ def execute(mode: str = "", optimizer: str = "cpu", checkpoint_dir: str = ""):
     train_args = (
         f"{ckpt_args} "
         f"{rollout_args} "
-        f"{optimizer_args(optimizer)} "
+        f"{optimizer_args(optimizer, checkpoint_dir)} "
         f"{ppo_args} "
         f"{U.get_default_wandb_args(__file__)} "
         f"{perf_args} "
