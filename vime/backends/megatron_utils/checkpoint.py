@@ -127,7 +127,18 @@ def save_checkpoint(
     preprocess_common_state_dict_fn=None,
     **kwargs,
 ):
-    result = _save_checkpoint_megatron(
+    args = get_args()
+    stores = _nvme_stores(optimizer)
+    # Megatron writes latest_checkpointed_iteration.txt inside this call.  Persist the
+    # streamed state first so that a published tracker can never point at an incomplete
+    # NVMe optimizer checkpoint.
+    if stores and not getattr(args, "no_save_optim", False):
+        base = _checkpoint_base(getattr(args, "save", None), iteration)
+        if base is None:
+            raise ValueError("NVMe optimizer streaming requires --save for optimizer checkpoints")
+        for store in stores:
+            store.save_to(base)
+    return _save_checkpoint_megatron(
         iteration,
         model,
         optimizer,
@@ -138,15 +149,6 @@ def save_checkpoint(
         preprocess_common_state_dict_fn=preprocess_common_state_dict_fn,
         **kwargs,
     )
-    args = get_args()
-    stores = _nvme_stores(optimizer)
-    if stores and not getattr(args, "no_save_optim", False):
-        base = _checkpoint_base(getattr(args, "save", None), iteration)
-        if base is None:
-            raise ValueError("NVMe optimizer streaming requires --save for optimizer checkpoints")
-        for store in stores:
-            store.save_to(base)
-    return result
 
 
 def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_context):
@@ -167,7 +169,10 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
             skip_load_to_model_and_opt=False,
         )
         stores = _nvme_stores(optimizer)
-        if stores and result[0] is not None:
+        # Megatron already skips its optimizer payload under --no-load-optim.  The
+        # streamed payload must follow the same contract, even when an old NVMe
+        # directory happens to exist beside the checkpoint.
+        if stores and result[0] is not None and not getattr(args, "no_load_optim", False):
             base = _checkpoint_base(load_path, result[0])
             loaded = [store.load_from(base) for store in stores]
             if any(loaded):

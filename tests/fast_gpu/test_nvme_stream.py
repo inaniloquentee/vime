@@ -5,8 +5,10 @@ full Megatron model: the production DistributedOptimizer binding is tested throu
 the same _Bucket and checkpoint primitives it uses.
 """
 
+import importlib.util
 import os
-from types import SimpleNamespace
+import sys
+import types
 
 import pytest
 import torch
@@ -111,7 +113,17 @@ def test_nvme_checkpoint_round_trip_restores_main_and_moments(tmp_path):
         _state_copy(optimizer, param),
     ):
         torch.testing.assert_close(lhs, rhs, atol=0.0, rtol=0.0)
-    assert restored_opt.param_groups[0].get("step", 0) == optimizer.param_groups[0].get("step", 0)
+    restored_step = restored_opt.state[restored_param]["step"]
+    original_step = optimizer.state[param]["step"]
+    torch.testing.assert_close(restored_step.cpu(), original_step.cpu(), atol=0.0, rtol=0.0)
+
+    # Verify that a resumed optimizer can perform the next update exactly.
+    grad = torch.linspace(0.2, 0.9, restored_param.numel(), device="cuda")
+    restored_param.grad = grad
+    restored_opt.step()
+    param.grad = grad
+    optimizer.step()
+    torch.testing.assert_close(restored_param, param, atol=0.0, rtol=0.0)
     os.close(bucket.fd)
     os.close(restored_bucket.fd)
 
@@ -143,3 +155,85 @@ def test_bf16_moment_storage_round_trip(tmp_path):
         optimizer.state[param]["exp_avg_sq"], expected_sq, atol=2e-3, rtol=2e-3
     )
     os.close(bucket.fd)
+
+
+def _load_checkpoint_wrapper():
+    megatron = types.ModuleType("megatron")
+    training = types.ModuleType("megatron.training")
+    checkpointing = types.ModuleType("megatron.training.checkpointing")
+    global_vars = types.ModuleType("megatron.training.global_vars")
+    checkpointing.load_checkpoint = lambda *args, **kwargs: None
+    checkpointing.save_checkpoint = lambda *args, **kwargs: None
+    global_vars.get_args = lambda: None
+    training.__path__ = []
+    megatron.__path__ = []
+    modules = {
+        "megatron": megatron,
+        "megatron.training": training,
+        "megatron.training.checkpointing": checkpointing,
+        "megatron.training.global_vars": global_vars,
+    }
+    previous = {name: sys.modules.get(name) for name in modules}
+    sys.modules.update(modules)
+    spec = importlib.util.spec_from_file_location(
+        "vime_checkpoint_test_module",
+        os.path.join(os.path.dirname(__file__), "../../vime/backends/megatron_utils/checkpoint.py"),
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    for name, old in previous.items():
+        if old is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = old
+    return module
+
+
+def test_checkpoint_wrapper_saves_streamed_state_before_tracker(tmp_path, monkeypatch):
+    checkpointing = _load_checkpoint_wrapper()
+    events = []
+
+    class Store:
+        def save_to(self, base):
+            events.append(("nvme", base))
+
+    args = types.SimpleNamespace(save=str(tmp_path), no_save_optim=False)
+    optimizer = types.SimpleNamespace(_nvme_state_store=Store())
+    monkeypatch.setattr(checkpointing, "get_args", lambda: args)
+    monkeypatch.setattr(
+        checkpointing,
+        "_save_checkpoint_megatron",
+        lambda *a, **k: events.append(("megatron",)) or "saved",
+    )
+
+    result = checkpointing.save_checkpoint(3, None, optimizer, None)
+
+    assert result == "saved"
+    assert [event[0] for event in events] == ["nvme", "megatron"]
+    assert events[0][1].endswith("iter_0000003")
+
+
+def test_checkpoint_wrapper_honors_no_load_optim(tmp_path, monkeypatch):
+    checkpointing = _load_checkpoint_wrapper()
+    (tmp_path / "latest_checkpointed_iteration.txt").write_text("3")
+    events = []
+
+    class Store:
+        def load_from(self, base):
+            events.append(base)
+            raise AssertionError("NVMe state must not load with --no-load-optim")
+
+    args = types.SimpleNamespace(load=str(tmp_path), no_load_optim=True)
+    optimizer = types.SimpleNamespace(_nvme_state_store=Store())
+    monkeypatch.setattr(checkpointing, "get_args", lambda: args)
+    monkeypatch.setattr(
+        checkpointing,
+        "_load_checkpoint_megatron",
+        lambda **kwargs: (3, 0),
+    )
+
+    result = checkpointing.load_checkpoint(None, optimizer, None, None)
+
+    assert result == (3, 0)
+    assert events == []
