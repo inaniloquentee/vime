@@ -172,6 +172,7 @@ class _Stager:
             self._device_buf = torch.empty(size, dtype=torch.uint8, device=like.device)
         return self._device_buf[: numel * dtype.itemsize].view(dtype)
 
+    @torch.no_grad()
     def transfer(self, fd: int, offset: int, tensor: torch.Tensor, dtype: torch.dtype, *, to_disk: bool) -> int:
         flat = tensor.view(-1)
         cast = dtype != flat.dtype
