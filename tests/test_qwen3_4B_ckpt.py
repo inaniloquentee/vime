@@ -1,3 +1,4 @@
+import json
 import os
 from argparse import ArgumentParser
 from shlex import quote
@@ -59,6 +60,20 @@ def optimizer_args(optimizer: str, checkpoint_dir: str):
             "--stream-optimizer-state-moment-dtype fp32 "
         )
     return args
+
+
+def assert_nvme_checkpoint(checkpoint_dir: str):
+    manifests = sorted(Path(checkpoint_dir).rglob("manifest.json"))
+    assert manifests, f"No NVMe optimizer manifests found below {checkpoint_dir}"
+    bucket_files = 0
+    for manifest_path in manifests:
+        manifest = json.loads(manifest_path.read_text())
+        assert manifest.get("dtypes", {}).get("main") == "torch.float32"
+        assert manifest.get("buckets"), f"Empty NVMe bucket manifest: {manifest_path}"
+        for bucket in manifest["buckets"]:
+            assert (manifest_path.parent / bucket["file"]).is_file()
+            bucket_files += 1
+    print(f"Validated {len(manifests)} NVMe manifests and {bucket_files} bucket files")
 
 
 def execute(mode: str = "", optimizer: str = "cpu", checkpoint_dir: str = ""):
@@ -164,4 +179,6 @@ if __name__ == "__main__":
         optimizer=args.save_optimizer,
         checkpoint_dir=checkpoint_dir,
     )
+    if args.save_optimizer == "nvme":
+        assert_nvme_checkpoint(checkpoint_dir)
     execute("load", optimizer=args.load_optimizer, checkpoint_dir=checkpoint_dir)
