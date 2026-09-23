@@ -476,7 +476,12 @@ class NVMeOptimizerStateStore:
                 if step:
                     group["step"] = step
             bucket.allocate_moments()
-            state_steps = meta.get("state_steps", [])
+            state_steps = meta.get("state_steps")
+            if state_steps is None:
+                # Manifests written before per-parameter steps were persisted only
+                # group-level counters.  Use those counters as a compatible fallback.
+                group_steps = meta.get("steps", [])
+                state_steps = [group_steps[entry.group_index] for entry in bucket.entries]
             if state_steps:
                 assert len(state_steps) == len(bucket.entries)
                 for entry, step in zip(bucket.entries, state_steps, strict=True):
