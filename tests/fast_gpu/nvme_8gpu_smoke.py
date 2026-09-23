@@ -13,6 +13,9 @@ from vime_plugins.optimizers.nvme_stream import _Bucket, _Entry, _Stager
 
 
 def main():
+    # Some RL_Kernel NVSwitch nodes expose a broken NVLS fabric; the test
+    # validates optimizer/NVMe behavior, so use ordinary NCCL collectives.
+    os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     dist.init_process_group("nccl")
