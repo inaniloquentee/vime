@@ -52,6 +52,12 @@ For example, 24 samples with `--global-batch-size 16` produce steps of 16 and 8.
 An explicit `--global-batch-size-schedule 16,8` enables the variable mode as well.
 Without these flags the existing fixed-batch behavior is unchanged.
 
+Batch sizes count rollout groups, not the number of training samples produced by
+compact/subagent rollouts. An explicit schedule must cover every rollout group
+exactly. Every step, including a trailing partial step, must still provide enough
+samples and microbatches for Vime's DP/VPP alignment constraints; an undersized
+step is rejected rather than silently dropped or padded.
+
 ## Validation
 
 In a dedicated eight-GPU Vime container with prepared model/data caches:

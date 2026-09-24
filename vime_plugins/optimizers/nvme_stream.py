@@ -9,15 +9,15 @@ sleep-window offload cannot help with.
 
 ``setup_optimizer_state_streaming`` gives each ``DistributedOptimizer`` in the chain
 a store and routes the five entry points that touch optimizer state at it, so
-Megatron carries no NVMe-specific behaviour. The one piece that stays on Megatron's
-side is the pair of checkpoint hooks in ``megatron/training/checkpointing.py``, which
-have to be inside ``save_checkpoint`` / ``load_checkpoint`` to cover every call path;
-they reach this class through four methods:
+the optimizer update stays in this module. Vime's checkpoint wrappers in
+``vime/backends/megatron_utils/checkpoint.py`` persist and restore streamed state
+around Megatron's checkpoint calls. The store exposes these operations:
 
     step()
     refresh_main_from_model_params(copy_fn)
     save_to(base_dir)
     load_from(base_dir) -> bool
+    restore_main_to_model_params()
 
 Both directory arguments are checkpoint *bases*; the per-rank layout underneath is
 this file's business, matching the layout of the live scratch directory.
@@ -480,7 +480,9 @@ class NVMeOptimizerStateStore:
             if state_steps is None:
                 # Manifests written before per-parameter steps were persisted only
                 # group-level counters.  Use those counters as a compatible fallback.
-                group_steps = meta.get("steps", [])
+                # Each bucket owns only a subset of the global optimizer groups.
+                # Its saved counters follow that subset's sorted, local order.
+                group_steps = dict(zip(bucket.group_indices, meta["steps"], strict=True))
                 state_steps = [group_steps[entry.group_index] for entry in bucket.entries]
             if state_steps:
                 assert len(state_steps) == len(bucket.entries)
@@ -490,7 +492,8 @@ class NVMeOptimizerStateStore:
                             step, dtype=torch.float32, device=entry.main_param.device
                         )
         fp32_state = os.path.join(dirpath, "fp32_resident_optimizer.pt")
-        if self._fp32_adam is not None and os.path.isfile(fp32_state):
+        # A missing resident-state payload must not silently restart its Adam history.
+        if self._fp32_adam is not None:
             self._fp32_adam.load_state_dict(torch.load(fp32_state))
         logger.info(f"NVMe optimizer state loaded: {len(self.buckets)} buckets <- {dirpath}")
         return True

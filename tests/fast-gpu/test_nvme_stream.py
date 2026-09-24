@@ -6,6 +6,7 @@ the same _Bucket and checkpoint primitives it uses.
 """
 
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -128,6 +129,103 @@ def test_nvme_checkpoint_round_trip_restores_main_and_moments(tmp_path, optimize
         torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
     os.close(bucket.fd)
     os.close(restored_bucket.fd)
+
+
+@pytest.mark.parametrize("group_indices", [(1,), (1, 4)])
+def test_legacy_checkpoint_uses_bucket_local_group_steps(tmp_path, group_indices):
+    """Miles-style manifests store steps in bucket-local, not global, group order."""
+    from megatron.core.optimizer import Adam
+
+    def make_store(name):
+        params = [torch.nn.Parameter(torch.linspace(-1.0, 1.0, 1024, device="cuda")) for _ in group_indices]
+        adam = Adam([{"params": [param]} for param in params], lr=1e-3)
+        bucket = _Bucket(
+            str(tmp_path / f"{name}.bin"),
+            [_Entry(param, param, group_index) for param, group_index in zip(params, group_indices, strict=True)],
+            adam,
+            _Stager(1 << 20),
+            {segment: torch.float32 for segment in ("main", "exp_avg", "exp_avg_sq")},
+        )
+        store = object.__new__(NVMeOptimizerStateStore)
+        store._rank = store._instance = store.uid = 0
+        store.dir = str(tmp_path / name)
+        store.dtypes = bucket.dtypes
+        store.buckets = [bucket]
+        store._fp32_adam = None
+        store._allow_fresh_state = False
+        return store, bucket, adam, params
+
+    store, bucket, adam, params = make_store("live")
+    restored, restored_bucket, restored_adam, restored_params = make_store("restored")
+    try:
+        for param in params:
+            param.grad = torch.full_like(param, 0.25)
+        adam.step()
+        # Distinct counters expose both out-of-range indexing and wrong-group aliases.
+        for index, group in enumerate(adam.param_groups):
+            group["step"] = 2 + index * 3
+        bucket.flush()
+        checkpoint = tmp_path / "checkpoint"
+        store.save_to(str(checkpoint))
+        manifest_path = checkpoint / store.relative_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        for meta in manifest["buckets"]:
+            del meta["state_steps"]
+        manifest_path.write_text(json.dumps(manifest))
+
+        assert restored.load_from(str(checkpoint))
+        assert [group["step"] for group in restored_adam.param_groups] == [
+            group["step"] for group in adam.param_groups
+        ]
+        bucket.fetch()
+        restored_bucket.fetch()
+        for original, loaded in zip(params, restored_params, strict=True):
+            for actual, expected in zip(_state_copy(restored_adam, loaded), _state_copy(adam, original), strict=True):
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            original.grad = torch.full_like(original, 0.5)
+            loaded.grad = original.grad.clone()
+        adam.step()
+        restored_adam.step()
+        for original, loaded in zip(params, restored_params, strict=True):
+            for actual, expected in zip(_state_copy(restored_adam, loaded), _state_copy(adam, original), strict=True):
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    finally:
+        os.close(bucket.fd)
+        os.close(restored_bucket.fd)
+
+
+@pytest.mark.parametrize("missing_payload", [False, True])
+def test_native_fp32_checkpoint_requires_resident_optimizer_state(tmp_path, missing_payload):
+    def make_store():
+        store = object.__new__(NVMeOptimizerStateStore)
+        store._rank = store._instance = store.uid = 0
+        store.dtypes = {segment: torch.float32 for segment in ("main", "exp_avg", "exp_avg_sq")}
+        store.buckets = []
+        store._allow_fresh_state = False
+        param = torch.nn.Parameter(torch.ones(32, device="cuda"))
+        store._fp32_adam = torch.optim.Adam([param], lr=1e-3)
+        return store, param
+
+    original, param = make_store()
+    param.grad = torch.full_like(param, 0.25)
+    original._fp32_adam.step()
+    original.save_to(str(tmp_path))
+    if missing_payload:
+        (tmp_path / original.relative_dir / "fp32_resident_optimizer.pt").unlink()
+
+    restored, restored_param = make_store()
+    if missing_payload:
+        with pytest.raises(FileNotFoundError, match="fp32_resident_optimizer.pt"):
+            restored.load_from(str(tmp_path))
+    else:
+        assert restored.load_from(str(tmp_path))
+        for key in ("exp_avg", "exp_avg_sq", "step"):
+            torch.testing.assert_close(
+                restored._fp32_adam.state[restored_param][key],
+                original._fp32_adam.state[param][key],
+                atol=0,
+                rtol=0,
+            )
 
 
 def test_bf16_moment_storage_round_trip(tmp_path):

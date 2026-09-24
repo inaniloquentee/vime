@@ -45,6 +45,11 @@ FP32 moment storage 已有完整模型验证，BF16 moment storage 已有组件�
 显式指定 `--global-batch-size-schedule 16,8` 也会启用可变模式。
 不使用这些参数时，原有固定 batch 行为不变。
 
+Batch 大小按 rollout group 计数，而不是 compact/subagent rollout 产生的训练样本数。
+显式 schedule 必须恰好覆盖所有 rollout group。每一步（包括尾部不足完整 batch 的一步）
+仍需提供足够的样本和 microbatch，以满足 Vime 的 DP/VPP 对齐约束；过小的 step 会报错，
+而不是静默丢弃或补齐样本。
+
 ## 验证
 
 在已准备好模型和数据缓存的独立八卡 Vime 容器中运行：
