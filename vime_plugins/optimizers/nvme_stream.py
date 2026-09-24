@@ -84,7 +84,11 @@ def _reserve(fd: int, nbytes: int) -> None:
 
 def _allocate_file(path: str, nbytes: int) -> int:
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
-    _reserve(fd, nbytes)
+    try:
+        _reserve(fd, nbytes)
+    except BaseException:
+        os.close(fd)
+        raise
     return fd
 
 
