@@ -24,9 +24,9 @@ from vime_plugins.optimizers.nvme_stream import (
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 
 
-def _make_bucket(path, values, *, lr=1e-3):
+def _make_bucket(path, values, *, lr=1e-3, optimizer_type=torch.optim.Adam):
     param = torch.nn.Parameter(values.clone().cuda())
-    optimizer = torch.optim.Adam([param], lr=lr, betas=(0.9, 0.95), eps=1e-8)
+    optimizer = optimizer_type([param], lr=lr, betas=(0.9, 0.95), eps=1e-8)
     param.grad = torch.linspace(0.1, 1.0, param.numel(), device="cuda").view_as(param)
     optimizer.step()  # materializes Adam moments and the step counter
     entry = _Entry(param, param, 0)
@@ -65,13 +65,18 @@ def test_bucket_fetch_step_matches_in_memory_adam(tmp_path):
 
     expected = _state_copy(reference_opt, reference)
     actual = _state_copy(streamed_opt, streamed)
-    for got, want in zip(actual, expected):
+    for got, want in zip(actual, expected, strict=True):
         torch.testing.assert_close(got, want, atol=0.0, rtol=0.0)
 
 
-def test_nvme_checkpoint_round_trip_restores_main_and_moments(tmp_path):
+@pytest.mark.parametrize("optimizer_backend", ["torch", "megatron"])
+def test_nvme_checkpoint_round_trip_restores_main_and_moments(tmp_path, optimizer_backend):
+    if optimizer_backend == "megatron":
+        from megatron.core.optimizer import Adam as optimizer_type
+    else:
+        optimizer_type = torch.optim.Adam
     initial = torch.linspace(-2.0, 2.0, 2048)
-    param, optimizer, bucket = _make_bucket(tmp_path / "live.bin", initial)
+    param, optimizer, bucket = _make_bucket(tmp_path / "live.bin", initial, optimizer_type=optimizer_type)
     bucket.flush()
 
     store = object.__new__(NVMeOptimizerStateStore)
@@ -86,7 +91,7 @@ def test_nvme_checkpoint_round_trip_restores_main_and_moments(tmp_path):
     store.save_to(str(tmp_path / "checkpoint"))
 
     restored_param = torch.nn.Parameter(initial.cuda())
-    restored_opt = torch.optim.Adam([restored_param], lr=1e-3, betas=(0.9, 0.95), eps=1e-8)
+    restored_opt = optimizer_type([restored_param], lr=1e-3, betas=(0.9, 0.95), eps=1e-8)
     restored_entry = _Entry(restored_param, restored_param, 0)
     restored_bucket = _Bucket(
         str(tmp_path / "restored.bin"),
@@ -111,11 +116,13 @@ def test_nvme_checkpoint_round_trip_restores_main_and_moments(tmp_path):
     for lhs, rhs in zip(
         _state_copy(restored_opt, restored_param),
         _state_copy(optimizer, param),
+        strict=True,
     ):
         torch.testing.assert_close(lhs, rhs, atol=0.0, rtol=0.0)
-    restored_step = restored_opt.state[restored_param]["step"]
-    original_step = optimizer.state[param]["step"]
-    torch.testing.assert_close(restored_step.cpu(), original_step.cpu(), atol=0.0, rtol=0.0)
+    # Torch Adam tracks per-parameter steps; Megatron's fused Adam tracks groups.
+    restored_step = restored_opt.state[restored_param].get("step", restored_opt.param_groups[0].get("step"))
+    original_step = optimizer.state[param].get("step", optimizer.param_groups[0].get("step"))
+    assert float(restored_step) == float(original_step) == 1
 
     # Verify that a resumed optimizer can perform the next update exactly.
     grad = torch.linspace(0.2, 0.9, restored_param.numel(), device="cuda")
@@ -123,7 +130,8 @@ def test_nvme_checkpoint_round_trip_restores_main_and_moments(tmp_path):
     restored_opt.step()
     param.grad = grad
     optimizer.step()
-    torch.testing.assert_close(restored_param, param, atol=0.0, rtol=0.0)
+    for actual, expected in zip(_state_copy(restored_opt, restored_param), _state_copy(optimizer, param), strict=True):
+        torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
     os.close(bucket.fd)
     os.close(restored_bucket.fd)
 
