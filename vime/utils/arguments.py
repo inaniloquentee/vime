@@ -2042,6 +2042,10 @@ def vime_validate_args(args):
             args.log_probs_max_tokens_per_gpu = args.max_tokens_per_gpu
 
     if getattr(args, "stream_optimizer_state_to_disk", False):
+        if getattr(args, "fp16", False) or not getattr(args, "bf16", False):
+            raise ValueError("--stream-optimizer-state-to-disk currently requires BF16 model training")
+        if getattr(args, "ckpt_format", "torch_dist") != "torch_dist":
+            raise ValueError("--stream-optimizer-state-to-disk currently requires --ckpt-format torch_dist")
         assert (
             getattr(args, "optimizer", "adam").lower() == "adam"
         ), "--stream-optimizer-state-to-disk currently requires --optimizer adam"

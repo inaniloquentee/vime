@@ -30,6 +30,7 @@ import logging
 import os
 import shutil
 import time
+import weakref
 from types import MethodType
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -179,7 +180,15 @@ class _Bucket:
                 at += _align(entry.main_param.numel() * dtypes[segment].itemsize)
         self.nbytes = at
         self.fd = _allocate_file(path, at)
+        self._close_fd = weakref.finalize(self, os.close, self.fd)
         self.moments_ready = False
+
+    def close(self) -> None:
+        """Release the descriptor once; GC also closes buckets abandoned on errors."""
+        try:
+            self._close_fd()
+        finally:
+            self.fd = None
 
     def _tensors(self, segment: str):
         for index, entry in enumerate(self.entries):
@@ -236,6 +245,7 @@ class NVMeOptimizerStateStore:
         NVMeOptimizerStateStore._next_uid += 1
         config = distrib_optimizer.config
 
+        assert config.bf16 and not config.fp16, "NVMe state store currently requires BF16 model training."
         assert not config.use_precision_aware_optimizer, (
             "NVMe state store requires the non-precision-aware optimizer " "(fp32 main params held by mcore)."
         )
@@ -532,6 +542,18 @@ def setup_optimizer_state_streaming(args, optimizer) -> None:
             f"NVMe optimizer main-param initialization: wrote {written / 1024**3:.1f} GB " f"directly to {store.dir}"
         )
         _bind(dist_opt, store)
+
+    # Megatron may auto-detect a legacy checkpoint even when torch_dist was
+    # requested. Guard the outer optimizer too, including ChainedOptimizer.
+    optimizer.save_parameter_state = MethodType(_reject_legacy_checkpoint, optimizer)
+    optimizer.load_parameter_state = MethodType(_reject_legacy_checkpoint, optimizer)
+
+
+def _reject_legacy_checkpoint(self, *args, **kwargs):
+    raise RuntimeError(
+        "NVMe optimizer streaming requires torch_dist optimizer checkpoints; "
+        "use --no-load-optim or --finetune to load only model weights from a legacy checkpoint."
+    )
 
 
 def _state_dir_root(args) -> str:

@@ -23,19 +23,23 @@ moments 保存在文件中，每次只加载、更新并写回一个 bucket。�
 最大的单个 FP32 shard 仍需短暂放入显存；随后逐个 materialize main-only bucket。
 模型原生的 FP32 参数仍驻留 GPU。
 
-支持范围为 Adam + Megatron DistributedOptimizer，不支持 precision-aware optimizer、
+支持范围为 BF16 模型训练 + Adam + Megatron DistributedOptimizer，不支持 precision-aware optimizer、
 CPU optimizer offload、Megatron FSDP、FP8 模型参数、Muon 或 stateless Adam。
+FP16 模型训练会提前报错，因为目前没有实现其 loss-scaler checkpoint 状态的保存与恢复。
 FP32 moment storage 已有完整模型验证，BF16 moment storage 已有组件验证；
 其他存储 dtype 未经过完整模型验证。
 
 ## 保存与恢复
 
-使用同步保存，并保持相同模型、optimizer state dtype 和并行拓扑。Checkpoint 包含各 rank
+使用同步 `--ckpt-format torch_dist` 保存，并保持相同模型、optimizer state dtype 和并行拓扑；
+其他 optimizer checkpoint 格式会被拒绝，包括自动识别出的旧格式 optimizer 状态。Checkpoint 包含各 rank
 的 bucket 文件和 manifest；流式状态会先于 Megatron 发布 checkpoint tracker 保存。
 改变 TP/PP/DP/CP 布局时不会自动 reshard。
 
 不含流式 optimizer state 的 checkpoint 不能静默恢复该状态。`--no-load-optim` 表示明确
-接受重新初始化 optimizer，而不是 checkpoint roundtrip。增加训练的 rollout 总量时，
+接受重新初始化 optimizer，而不是 checkpoint roundtrip。与 Megatron 一致，`--finetune`
+和 release checkpoint 也跳过 optimizer 状态恢复；普通的 iteration-zero checkpoint
+仍会恢复 optimizer 状态。上述只加载模型的模式仍可读取旧格式的模型权重。增加训练的 rollout 总量时，
 若需要沿用保存的 scheduler，可使用 Megatron 的 `--use-checkpoint-opt-param-scheduler`。
 
 ## 可变 global batch

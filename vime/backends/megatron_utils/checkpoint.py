@@ -117,6 +117,16 @@ def _checkpoint_base(path, iteration):
         return os.path.join(path, f"iter_{iteration:07d}")
 
 
+def _should_load_nvme_optimizer(args, load_path):
+    if getattr(args, "no_load_optim", False) or getattr(args, "finetune", False):
+        return False
+    # Megatron also skips optimizer state for a release checkpoint. Its returned
+    # iteration is zero, which alone cannot distinguish release from a valid
+    # iteration-zero training checkpoint.
+    tracker = Path(load_path) / "latest_checkpointed_iteration.txt"
+    return not (tracker.is_file() and tracker.read_text().strip() == "release")
+
+
 def save_checkpoint(
     iteration,
     model,
@@ -170,10 +180,9 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
             skip_load_to_model_and_opt=False,
         )
         stores = _nvme_stores(optimizer)
-        # Megatron already skips its optimizer payload under --no-load-optim.  The
-        # streamed payload must follow the same contract, even when an old NVMe
+        # Respect Megatron's model-only loading modes, even when an old NVMe
         # directory happens to exist beside the checkpoint.
-        if stores and result[0] is not None and not getattr(args, "no_load_optim", False):
+        if stores and result[0] is not None and _should_load_nvme_optimizer(args, load_path):
             base = _checkpoint_base(load_path, result[0])
             loaded = [store.load_from(base) for store in stores]
             if any(loaded):

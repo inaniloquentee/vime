@@ -44,7 +44,7 @@ def bucket_factory(tmp_path, cuda_device):
 
     yield make
     for bucket in buckets:
-        os.close(bucket.fd)
+        bucket.close()
 
 
 def _store(buckets, resident=None):
@@ -230,26 +230,74 @@ def test_checkpoint_wrapper_saves_streamed_state_before_tracker(tmp_path, monkey
     assert events[0][1].endswith("iter_0000003")
 
 
-def test_checkpoint_wrapper_honors_no_load_optim(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "mode,iteration,load_optimizer",
+    [
+        ("no-load-optim", 3, False),
+        ("finetune", 0, False),
+        ("release", 0, False),
+        ("release-step-override", 0, False),
+        ("resume-zero", 0, True),
+        ("resume", 3, True),
+    ],
+)
+def test_checkpoint_wrapper_load_modes(tmp_path, monkeypatch, mode, iteration, load_optimizer):
     checkpointing = _load_checkpoint_wrapper()
-    (tmp_path / "latest_checkpointed_iteration.txt").write_text("3")
+    tracker = "release" if mode.startswith("release") else str(3 if mode == "finetune" else iteration)
+    (tmp_path / "latest_checkpointed_iteration.txt").write_text(tracker)
     events = []
 
     class Store:
         def load_from(self, base):
-            events.append(base)
-            raise AssertionError("NVMe state must not load with --no-load-optim")
+            events.append(("load", base))
+            return True
 
-    args = types.SimpleNamespace(load=str(tmp_path), no_load_optim=True)
+        def restore_main_to_model_params(self):
+            events.append(("restore",))
+
+    args = types.SimpleNamespace(
+        load=str(tmp_path),
+        no_load_optim=mode == "no-load-optim",
+        finetune=mode == "finetune",
+        ckpt_step=7 if mode == "release-step-override" else None,
+    )
     optimizer = types.SimpleNamespace(_nvme_state_store=Store())
     monkeypatch.setattr(checkpointing, "get_args", lambda: args)
     monkeypatch.setattr(
         checkpointing,
         "_load_checkpoint_megatron",
-        lambda **kwargs: (3, 0),
+        lambda **kwargs: (iteration, 0),
     )
 
     result = checkpointing.load_checkpoint(None, optimizer, None, None)
 
-    assert result == (3, 0)
-    assert events == []
+    assert result == (iteration, 0)
+    expected = [("load", str(tmp_path / f"iter_{iteration:07d}")), ("restore",)] if load_optimizer else []
+    assert events == expected
+
+
+@pytest.mark.parametrize("chained", [False, True])
+def test_legacy_checkpoint_entrypoints_are_rejected(tmp_path, monkeypatch, chained):
+    import megatron.core.optimizer.distrib_optimizer as distrib
+
+    from vime_plugins.optimizers import nvme_stream as stream
+
+    class DistributedOptimizer:
+        is_stub_optimizer = False
+        config = types.SimpleNamespace(defer_main_param_initialization=True)
+
+    store = types.SimpleNamespace(dir=str(tmp_path), initialize_main_from_model_params=lambda: 0)
+    monkeypatch.setattr(distrib, "DistributedOptimizer", DistributedOptimizer)
+    monkeypatch.setattr(stream, "NVMeOptimizerStateStore", lambda *args, **kwargs: store)
+    monkeypatch.setattr(stream, "_purge_rank_dir", lambda root: None)
+    dist_opt = DistributedOptimizer()
+    optimizer = types.SimpleNamespace(chained_optimizers=[dist_opt]) if chained else dist_opt
+    args = types.SimpleNamespace(
+        offload_train_disk_dir=str(tmp_path),
+        offload_train_disk_chunk_mb=1,
+        stream_optimizer_state_moment_dtype="fp32",
+    )
+    stream.setup_optimizer_state_streaming(args, optimizer)
+    for operation in ("save_parameter_state", "load_parameter_state"):
+        with pytest.raises(RuntimeError, match="requires torch_dist"):
+            getattr(optimizer, operation)(str(tmp_path / "legacy.pt"))

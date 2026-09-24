@@ -70,7 +70,7 @@ def test_direct_initialization_exact_bytes_releases_storage_and_bounds_peak(tmp_
         print(f"NVMe init: buckets={bucket_count} main_bytes={written} peak_delta={peak_delta}")
     finally:
         for bucket in buckets:
-            os.close(bucket.fd)
+            bucket.close()
 
 
 @pytest.fixture
@@ -189,3 +189,32 @@ def test_failed_file_reservation_closes_descriptor(tmp_path, monkeypatch):
             os.close(opened[0])
         except OSError:
             pass
+
+
+@pytest.mark.parametrize("cleanup", ["close", "gc"])
+def test_bucket_descriptor_lifetime(tmp_path, cleanup):
+    param = torch.zeros(1)
+    bucket = stream._Bucket(
+        str(tmp_path / "bucket.bin"),
+        [stream._Entry(param, param, 0)],
+        None,
+        None,
+        dict.fromkeys(stream.SEGMENTS, torch.float32),
+    )
+    fd = bucket.fd
+    if cleanup == "close":
+        bucket.close()
+        assert bucket.fd is None
+    else:
+        del bucket
+        gc.collect()
+    with pytest.raises(OSError) as failure:
+        os.fstat(fd)
+    assert failure.value.errno == errno.EBADF
+    # Reusing the freed fd must be safe from a second close or later finalization.
+    with (tmp_path / "replacement").open("wb") as replacement:
+        if cleanup == "close":
+            bucket.close()
+            del bucket
+            gc.collect()
+        os.fstat(replacement.fileno())

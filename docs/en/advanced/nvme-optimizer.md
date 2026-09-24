@@ -27,22 +27,28 @@ largest individual FP32 shard must still fit briefly; initialization then
 materializes one main-only bucket at a time. Native-FP32 model parameters remain
 GPU-resident.
 
-The supported path is Adam with Megatron DistributedOptimizer, without
+The supported path is BF16 model training with Adam and Megatron DistributedOptimizer, without
 precision-aware optimizer mode, CPU optimizer offload, Megatron FSDP, FP8 model
-parameters, Muon or stateless Adam. FP32 moment storage has full-model coverage;
+parameters, Muon or stateless Adam. FP16 model training is rejected because its
+loss-scaler checkpoint state is not supported. FP32 moment storage has full-model coverage;
 BF16 moment storage has component coverage. Other storage dtypes are not covered
 by the full-model validation.
 
 ## Checkpoint and resume
 
-Use synchronous saving and resume with the same model, optimizer-state dtypes and
-parallel topology. The checkpoint includes per-rank bucket files and manifests;
+Use synchronous `--ckpt-format torch_dist` saving and resume with the same model,
+optimizer-state dtypes and parallel topology. Other optimizer-checkpoint formats
+are rejected, including auto-detected legacy optimizer state.
+The checkpoint includes per-rank bucket files and manifests;
 the streamed state is saved before Megatron publishes its checkpoint tracker.
 The format is not resharded when TP/PP/DP/CP layout changes.
 
 A checkpoint without streamed optimizer state cannot resume that state silently.
 `--no-load-optim` explicitly accepts starting a fresh optimizer; it is not a
-checkpoint roundtrip. When extending a run's rollout budget, use Megatron's
+checkpoint roundtrip. As with Megatron, `--finetune` and release checkpoints also
+skip optimizer-state restoration. An ordinary iteration-zero checkpoint still
+restores its optimizer state. Legacy model weights can still be loaded in these
+model-only modes. When extending a run's rollout budget, use Megatron's
 `--use-checkpoint-opt-param-scheduler` if the saved scheduler should be retained.
 
 ## Variable global batches
