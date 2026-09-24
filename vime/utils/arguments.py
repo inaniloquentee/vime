@@ -2180,7 +2180,7 @@ def vime_validate_args(args):
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
 
-    if args.global_batch_size_schedule is not None:
+    if getattr(args, "global_batch_size_schedule", None) is not None:
         try:
             args.global_batch_size_schedule = [
                 int(item.strip()) for item in args.global_batch_size_schedule.split(",") if item.strip()

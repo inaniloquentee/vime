@@ -1,8 +1,8 @@
-"""GPU tests for bucketed NVMe optimizer state streaming.
+"""NVMe numerical/checkpoint tests on the patched Megatron runtime.
 
-These tests deliberately exercise the file-backed transfer layer without requiring a
-full Megatron model: the production DistributedOptimizer binding is tested through
-the same _Bucket and checkpoint primitives it uses.
+Reuse the numerical test as a multi-GPU bucket smoke test (one reference per GPU):
+  torchrun --standalone --nproc_per_node=8 -m pytest -q \
+    tests/fast-gpu/test_nvme_stream.py -k bucket_fetch_step_matches
 """
 
 import importlib.util
@@ -16,205 +16,137 @@ import torch
 
 from vime_plugins.optimizers.nvme_stream import NVMeOptimizerStateStore, _Bucket, _Entry, _Stager
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+
+@pytest.fixture
+def cuda_device():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required")
+    with torch.cuda.device(int(os.environ.get("LOCAL_RANK", "0"))):
+        yield
 
 
-def _make_bucket(path, values, *, lr=1e-3, optimizer_type=torch.optim.Adam):
-    param = torch.nn.Parameter(values.clone().cuda())
-    optimizer = optimizer_type([param], lr=lr, betas=(0.9, 0.95), eps=1e-8)
-    param.grad = torch.linspace(0.1, 1.0, param.numel(), device="cuda").view_as(param)
-    optimizer.step()  # materializes Adam moments and the step counter
-    entry = _Entry(param, param, 0)
-    bucket = _Bucket(
-        str(path),
-        [entry],
-        optimizer,
-        _Stager(1 << 20),
-        {segment: torch.float32 for segment in ("main", "exp_avg", "exp_avg_sq")},
-    )
-    return param, optimizer, bucket
+@pytest.fixture
+def bucket_factory(tmp_path, cuda_device):
+    buckets = []
+
+    def make(name, values, groups=(0,), optimizer_type=torch.optim.Adam, moment_dtype=torch.float32):
+        params = [torch.nn.Parameter(values.clone().cuda()) for _ in groups]
+        adam = optimizer_type([{"params": [p]} for p in params], lr=1e-3, betas=(0.9, 0.95), eps=1e-8)
+        bucket = _Bucket(
+            str(tmp_path / f"{name}.bin"),
+            [_Entry(p, p, group) for p, group in zip(params, groups, strict=True)],
+            adam,
+            _Stager(1 << 20),
+            {"main": torch.float32, "exp_avg": moment_dtype, "exp_avg_sq": moment_dtype},
+        )
+        buckets.append(bucket)
+        return params, adam, bucket
+
+    yield make
+    for bucket in buckets:
+        os.close(bucket.fd)
+
+
+def _store(buckets, resident=None):
+    store = object.__new__(NVMeOptimizerStateStore)
+    store._rank = store._instance = store.uid = 0
+    store.buckets = buckets
+    store.dtypes = buckets[0].dtypes if buckets else dict.fromkeys(("main", "exp_avg", "exp_avg_sq"), torch.float32)
+    store._fp32_adam = resident
+    store._allow_fresh_state = False
+    return store
 
 
 def _state_copy(optimizer, param):
     state = optimizer.state[param]
-    return param.detach().clone(), state["exp_avg"].detach().clone(), state["exp_avg_sq"].detach().clone()
+    return tuple(t.detach().clone() for t in (param, state["exp_avg"], state["exp_avg_sq"]))
 
 
-def test_bucket_fetch_step_matches_in_memory_adam(tmp_path):
+def _assert_optimizer_equal(lhs, lhs_params, rhs, rhs_params):
+    for index, (a, b) in enumerate(zip(lhs_params, rhs_params, strict=True)):
+        for actual, expected in zip(_state_copy(lhs, a), _state_copy(rhs, b), strict=True):
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        # Fused Adam's group counter is authoritative, including after legacy loads.
+        assert float(lhs.param_groups[index].get("step", lhs.state[a].get("step"))) == float(
+            rhs.param_groups[index].get("step", rhs.state[b].get("step"))
+        )
+
+
+def test_bucket_fetch_step_matches_in_memory_adam(bucket_factory):
     initial = torch.linspace(-1.0, 1.0, 4096)
-    streamed, streamed_opt, bucket = _make_bucket(tmp_path / "stream.bin", initial)
-
+    params, streamed_opt, bucket = bucket_factory("stream", initial)
+    streamed = params[0]
+    streamed.grad = torch.linspace(0.1, 1.0, streamed.numel(), device=streamed.device)
+    streamed_opt.step()
     reference = torch.nn.Parameter(initial.cuda())
     reference_opt = torch.optim.Adam([reference], lr=1e-3, betas=(0.9, 0.95), eps=1e-8)
+    reference.grad = streamed.grad.clone()
     for _ in range(2):
-        reference.grad = torch.linspace(0.1, 1.0, reference.numel(), device="cuda").view_as(reference)
         reference_opt.step()
-
-    # Persist the state created by the first step, evict it, then run the second
-    # step after reading the state back from NVMe.
     bucket.flush()
     assert bucket.moments_ready
     bucket.fetch()
-    streamed.grad = torch.linspace(0.1, 1.0, streamed.numel(), device="cuda").view_as(streamed)
     streamed_opt.step()
-
-    expected = _state_copy(reference_opt, reference)
-    actual = _state_copy(streamed_opt, streamed)
-    for got, want in zip(actual, expected, strict=True):
-        torch.testing.assert_close(got, want, atol=0.0, rtol=0.0)
+    _assert_optimizer_equal(streamed_opt, params, reference_opt, [reference])
 
 
-@pytest.mark.parametrize("optimizer_backend", ["torch", "megatron"])
-def test_nvme_checkpoint_round_trip_restores_main_and_moments(tmp_path, optimizer_backend):
-    if optimizer_backend == "megatron":
-        from megatron.core.optimizer import Adam as optimizer_type
+@pytest.mark.parametrize(
+    "backend,groups,legacy",
+    [
+        pytest.param("torch", (0,), False, id="torch"),
+        pytest.param("megatron", (0,), False, id="megatron"),
+        pytest.param("megatron", (1,), True, id="legacy-group-1"),
+        pytest.param("megatron", (1, 4), True, id="legacy-groups-1-4"),
+    ],
+)
+def test_nvme_checkpoint_round_trip(bucket_factory, tmp_path, backend, groups, legacy):
+    if backend == "megatron":
+        from megatron.core.optimizer import Adam
     else:
-        optimizer_type = torch.optim.Adam
+        Adam = torch.optim.Adam
     initial = torch.linspace(-2.0, 2.0, 2048)
-    param, optimizer, bucket = _make_bucket(tmp_path / "live.bin", initial, optimizer_type=optimizer_type)
-    bucket.flush()
-
-    store = object.__new__(NVMeOptimizerStateStore)
-    store._rank = 0
-    store._instance = 0
-    store.uid = 7
-    store.dir = str(tmp_path / "live")
-    store.dtypes = bucket.dtypes
-    store.buckets = [bucket]
-    store._fp32_adam = None
-    store._allow_fresh_state = False
-    store.save_to(str(tmp_path / "checkpoint"))
-
-    restored_param = torch.nn.Parameter(initial.cuda())
-    restored_opt = optimizer_type([restored_param], lr=1e-3, betas=(0.9, 0.95), eps=1e-8)
-    restored_entry = _Entry(restored_param, restored_param, 0)
-    restored_bucket = _Bucket(
-        str(tmp_path / "restored.bin"),
-        [restored_entry],
-        restored_opt,
-        _Stager(1 << 20),
-        bucket.dtypes,
-    )
-    restored_store = object.__new__(NVMeOptimizerStateStore)
-    restored_store._rank = 0
-    restored_store._instance = 0
-    restored_store.uid = 7
-    restored_store.dir = str(tmp_path / "restored")
-    restored_store.dtypes = bucket.dtypes
-    restored_store.buckets = [restored_bucket]
-    restored_store._fp32_adam = None
-    restored_store._allow_fresh_state = False
-    assert restored_store.load_from(str(tmp_path / "checkpoint"))
-
-    restored_bucket.fetch()
-    bucket.fetch()
-    for lhs, rhs in zip(
-        _state_copy(restored_opt, restored_param),
-        _state_copy(optimizer, param),
-        strict=True,
-    ):
-        torch.testing.assert_close(lhs, rhs, atol=0.0, rtol=0.0)
-    # Torch Adam tracks per-parameter steps; Megatron's fused Adam tracks groups.
-    restored_step = restored_opt.state[restored_param].get("step", restored_opt.param_groups[0].get("step"))
-    original_step = optimizer.state[param].get("step", optimizer.param_groups[0].get("step"))
-    assert float(restored_step) == float(original_step) == 1
-
-    # Verify that a resumed optimizer can perform the next update exactly.
-    grad = torch.linspace(0.2, 0.9, restored_param.numel(), device="cuda")
-    restored_param.grad = grad
-    restored_opt.step()
-    param.grad = grad
-    optimizer.step()
-    for actual, expected in zip(_state_copy(restored_opt, restored_param), _state_copy(optimizer, param), strict=True):
-        torch.testing.assert_close(actual, expected, atol=0.0, rtol=0.0)
-    os.close(bucket.fd)
-    os.close(restored_bucket.fd)
-
-
-@pytest.mark.parametrize("group_indices", [(1,), (1, 4)])
-def test_legacy_checkpoint_uses_bucket_local_group_steps(tmp_path, group_indices):
-    """Miles-style manifests store steps in bucket-local, not global, group order."""
-    from megatron.core.optimizer import Adam
-
-    def make_store(name):
-        params = [torch.nn.Parameter(torch.linspace(-1.0, 1.0, 1024, device="cuda")) for _ in group_indices]
-        adam = Adam([{"params": [param]} for param in params], lr=1e-3)
-        bucket = _Bucket(
-            str(tmp_path / f"{name}.bin"),
-            [_Entry(param, param, group_index) for param, group_index in zip(params, group_indices, strict=True)],
-            adam,
-            _Stager(1 << 20),
-            {segment: torch.float32 for segment in ("main", "exp_avg", "exp_avg_sq")},
-        )
-        store = object.__new__(NVMeOptimizerStateStore)
-        store._rank = store._instance = store.uid = 0
-        store.dir = str(tmp_path / name)
-        store.dtypes = bucket.dtypes
-        store.buckets = [bucket]
-        store._fp32_adam = None
-        store._allow_fresh_state = False
-        return store, bucket, adam, params
-
-    store, bucket, adam, params = make_store("live")
-    restored, restored_bucket, restored_adam, restored_params = make_store("restored")
-    try:
-        for param in params:
-            param.grad = torch.full_like(param, 0.25)
-        adam.step()
-        # Distinct counters expose both out-of-range indexing and wrong-group aliases.
+    params, adam, bucket = bucket_factory("live", initial, groups, Adam)
+    restored_params, restored_adam, restored_bucket = bucket_factory("restored", initial, groups, Adam)
+    for param in params:
+        param.grad = torch.full_like(param, 0.25)
+    adam.step()
+    if legacy:
+        # Distinct counters expose wrong aliases as well as out-of-range indexing.
         for index, group in enumerate(adam.param_groups):
             group["step"] = 2 + index * 3
-        bucket.flush()
-        checkpoint = tmp_path / "checkpoint"
-        store.save_to(str(checkpoint))
+    bucket.flush()
+    store = _store([bucket])
+    checkpoint = tmp_path / "checkpoint"
+    store.save_to(str(checkpoint))
+    if legacy:
         manifest_path = checkpoint / store.relative_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
         for meta in manifest["buckets"]:
             del meta["state_steps"]
         manifest_path.write_text(json.dumps(manifest))
-
-        assert restored.load_from(str(checkpoint))
-        assert [group["step"] for group in restored_adam.param_groups] == [
-            group["step"] for group in adam.param_groups
-        ]
-        bucket.fetch()
-        restored_bucket.fetch()
-        for original, loaded in zip(params, restored_params, strict=True):
-            for actual, expected in zip(_state_copy(restored_adam, loaded), _state_copy(adam, original), strict=True):
-                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-            original.grad = torch.full_like(original, 0.5)
-            loaded.grad = original.grad.clone()
-        adam.step()
-        restored_adam.step()
-        for original, loaded in zip(params, restored_params, strict=True):
-            for actual, expected in zip(_state_copy(restored_adam, loaded), _state_copy(adam, original), strict=True):
-                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-    finally:
-        os.close(bucket.fd)
-        os.close(restored_bucket.fd)
+    assert _store([restored_bucket]).load_from(str(checkpoint))
+    bucket.fetch()
+    restored_bucket.fetch()
+    _assert_optimizer_equal(restored_adam, restored_params, adam, params)
+    for original, loaded in zip(params, restored_params, strict=True):
+        original.grad = torch.linspace(0.2, 0.9, original.numel(), device=original.device)
+        loaded.grad = original.grad.clone()
+    adam.step()
+    restored_adam.step()
+    _assert_optimizer_equal(restored_adam, restored_params, adam, params)
 
 
 @pytest.mark.parametrize("missing_payload", [False, True])
-def test_native_fp32_checkpoint_requires_resident_optimizer_state(tmp_path, missing_payload):
-    def make_store():
-        store = object.__new__(NVMeOptimizerStateStore)
-        store._rank = store._instance = store.uid = 0
-        store.dtypes = {segment: torch.float32 for segment in ("main", "exp_avg", "exp_avg_sq")}
-        store.buckets = []
-        store._allow_fresh_state = False
-        param = torch.nn.Parameter(torch.ones(32, device="cuda"))
-        store._fp32_adam = torch.optim.Adam([param], lr=1e-3)
-        return store, param
-
-    original, param = make_store()
+def test_native_fp32_checkpoint_requires_resident_optimizer_state(tmp_path, cuda_device, missing_payload):
+    param = torch.nn.Parameter(torch.ones(32, device="cuda"))
+    original = _store([], torch.optim.Adam([param], lr=1e-3))
     param.grad = torch.full_like(param, 0.25)
     original._fp32_adam.step()
     original.save_to(str(tmp_path))
+    restored_param = torch.nn.Parameter(torch.ones_like(param))
+    restored = _store([], torch.optim.Adam([restored_param], lr=1e-3))
     if missing_payload:
         (tmp_path / original.relative_dir / "fp32_resident_optimizer.pt").unlink()
-
-    restored, restored_param = make_store()
-    if missing_payload:
         with pytest.raises(FileNotFoundError, match="fp32_resident_optimizer.pt"):
             restored.load_from(str(tmp_path))
     else:
@@ -228,29 +160,17 @@ def test_native_fp32_checkpoint_requires_resident_optimizer_state(tmp_path, miss
             )
 
 
-def test_bf16_moment_storage_round_trip(tmp_path):
-    initial = torch.linspace(-1.0, 1.0, 4096)
-    param = torch.nn.Parameter(initial.cuda())
-    optimizer = torch.optim.Adam([param], lr=1e-3)
-    param.grad = torch.linspace(0.1, 1.0, param.numel(), device="cuda").view_as(param)
-    optimizer.step()
-    entry = _Entry(param, param, 0)
-    bucket = _Bucket(
-        str(tmp_path / "bf16.bin"),
-        [entry],
-        optimizer,
-        _Stager(1 << 20),
-        {"main": torch.float32, "exp_avg": torch.bfloat16, "exp_avg_sq": torch.bfloat16},
-    )
-    expected_main = param.detach().clone()
-    expected_avg = optimizer.state[param]["exp_avg"].detach().clone()
-    expected_sq = optimizer.state[param]["exp_avg_sq"].detach().clone()
+def test_bf16_moment_storage_round_trip(bucket_factory):
+    params, adam, bucket = bucket_factory("bf16", torch.linspace(-1.0, 1.0, 4096), moment_dtype=torch.bfloat16)
+    param = params[0]
+    param.grad = torch.linspace(0.1, 1.0, param.numel(), device=param.device)
+    adam.step()
+    expected_main, expected_avg, expected_sq = _state_copy(adam, param)
     bucket.flush()
     bucket.fetch()
     torch.testing.assert_close(param, expected_main, atol=0, rtol=0)
-    torch.testing.assert_close(optimizer.state[param]["exp_avg"], expected_avg, atol=2e-3, rtol=2e-3)
-    torch.testing.assert_close(optimizer.state[param]["exp_avg_sq"], expected_sq, atol=2e-3, rtol=2e-3)
-    os.close(bucket.fd)
+    torch.testing.assert_close(adam.state[param]["exp_avg"], expected_avg, atol=2e-3, rtol=2e-3)
+    torch.testing.assert_close(adam.state[param]["exp_avg_sq"], expected_sq, atol=2e-3, rtol=2e-3)
 
 
 def _load_checkpoint_wrapper():

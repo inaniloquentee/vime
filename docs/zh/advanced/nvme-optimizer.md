@@ -59,7 +59,8 @@ export NCCL_NVLS_ENABLE=0
 export TMPDIR=/root/nvme
 python -m pytest -q tests/fast-gpu/test_nvme_optimizer_main_init.py
 python -m pytest -q tests/fast-gpu/test_nvme_stream.py
-torchrun --standalone --nproc_per_node=8 tests/fast-gpu/nvme_8gpu_smoke.py
+torchrun --standalone --nproc_per_node=8 -m pytest -q \
+  tests/fast-gpu/test_nvme_stream.py -k bucket_fetch_step_matches
 python tests/test_qwen3_4B_ckpt.py \
   --save-optimizer nvme --load-optimizer nvme \
   --skip-prepare --checkpoint-dir /root/nvme/checkpoint-NEW

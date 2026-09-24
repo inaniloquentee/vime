@@ -11,10 +11,11 @@ import torch
 from vime_plugins.optimizers import nvme_stream as stream
 
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
 @pytest.mark.parametrize("bucket_count", [1, 8])
+@requires_cuda
 def test_direct_initialization_exact_bytes_releases_storage_and_bounds_peak(tmp_path, bucket_count):
     entries_per_bucket, elements_per_entry = 2, 1024 * 1024
     stager = stream._Stager(256 * 1024)
@@ -90,6 +91,7 @@ def megatron_world(tmp_path):
 
 
 @pytest.mark.parametrize("deferred", [False, True])
+@requires_cuda
 def test_real_megatron_constructor_handles_and_peak(megatron_world, deferred):
     from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
     from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
