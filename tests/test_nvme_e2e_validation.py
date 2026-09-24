@@ -113,3 +113,97 @@ def test_gradient_evidence(tmp_path, norms):
     else:
         with pytest.raises(AssertionError):
             e2e.assert_nvme_grad_norms(checkpoint_dir, "save", 2)
+
+
+@pytest.mark.parametrize("phase", ["capture", "gpu", "gpu-repeat", "nvme", "soak", "resume"])
+def test_manual_benchmark_arguments(phase):
+    import shlex
+    from test_qwen3_4B_nvme_benchmark import benchmark_args
+
+    tokens = shlex.split(benchmark_args(phase, "/tmp/benchmark space", 22, resume_step=19))
+    assert tokens[tokens.index("--num-rollout") + 1] == "22"
+    assert "--use-precision-aware-optimizer" not in tokens
+    assert ("--stream-optimizer-state-to-disk" in tokens) == (phase in ("nvme", "soak", "resume"))
+    assert ("--load-debug-rollout-data" in tokens) == (phase in ("gpu", "gpu-repeat", "nvme"))
+    assert ("--debug-rollout-only" in tokens) == (phase == "capture")
+    assert ("--load" in tokens) == (phase == "resume")
+    assert ("--use-checkpoint-opt-param-scheduler" in tokens) == (phase == "resume")
+    assert "--ci-test" not in tokens  # Replay is off-policy; its metrics are checked separately.
+
+
+def test_manual_benchmark_deterministic_mode_is_explicit():
+    from test_qwen3_4B_nvme_benchmark import benchmark_args
+
+    assert "--deterministic-mode" not in benchmark_args("nvme", "/tmp/test", 22)
+    assert "--deterministic-mode" in benchmark_args("nvme", "/tmp/test", 22, deterministic=True)
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_manual_benchmark_rejects_stopped_jobs(tmp_path, complete):
+    from test_qwen3_4B_nvme_benchmark import validate_phase_output
+
+    for rank in range(8):
+        steps = [0, 1] if complete or rank != 7 else [0]
+        (tmp_path / f"steps-rank{rank:02d}.jsonl").write_text(
+            "".join(json.dumps({"step": step, "grad_norm": 1.0}) + "\n" for step in steps)
+        )
+    if complete:
+        validate_phase_output("gpu", tmp_path, 1)
+    else:
+        with pytest.raises(AssertionError, match="incomplete"):
+            validate_phase_output("gpu", tmp_path, 1)
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_manual_benchmark_gpu_preflight(monkeypatch, busy):
+    import test_qwen3_4B_nvme_benchmark as benchmark
+
+    status = "64000, 99\n" * 8 if busy else "4, 0\n" * 8
+    monkeypatch.setattr(benchmark.subprocess, "check_output", lambda *args, **kwargs: status)
+    if busy:
+        with pytest.raises(RuntimeError, match="eight idle GPUs"):
+            benchmark.require_idle_gpus(wait_seconds=0)
+    else:
+        benchmark.require_idle_gpus(wait_seconds=0)
+
+
+def test_gpu_preflight_waits_for_previous_worker_cleanup(monkeypatch):
+    import test_qwen3_4B_nvme_benchmark as benchmark
+
+    replies = iter(["4, 0\n" * 7 + "1110, 0\n", "4, 0\n" * 8])
+    monkeypatch.setattr(benchmark.subprocess, "check_output", lambda *args, **kwargs: next(replies))
+    monkeypatch.setattr(benchmark.time, "sleep", lambda seconds: None)
+    benchmark.require_idle_gpus(wait_seconds=10)
+
+
+@pytest.mark.parametrize("corruption", [None, "hash", "gradient", "incomplete"])
+def test_manual_comparison_requires_matching_complete_runs(tmp_path, corruption):
+    from test_qwen3_4B_nvme_benchmark import compare_replay_outputs
+
+    for phase in ("gpu", "gpu-repeat", "nvme"):
+        run = tmp_path / phase
+        run.mkdir()
+        for rank in range(8):
+            rows = [
+                dict(step=i, grad_norm=1.0, full_model_sha256="same",
+                     forward_backward_optimizer_seconds=0.5, peak_allocated_bytes=4096)
+                for i in range(2)
+            ]
+            if phase == "nvme" and rank == 7:
+                if corruption == "hash":
+                    rows[-1]["full_model_sha256"] = "different"
+                elif corruption == "gradient":
+                    rows[-1]["grad_norm"] = 2.0
+                elif corruption == "incomplete":
+                    rows.pop()
+            (run / f"steps-rank{rank:02d}.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows)
+            )
+    if corruption is None:
+        summary = compare_replay_outputs(tmp_path, num_rollouts=1, warmup_steps=0)
+        assert summary["gpu"]["measured_steps"] == 2
+        assert summary["full_model_hashes_equal_all_ranks"]
+    else:
+        with pytest.raises(AssertionError):
+            compare_replay_outputs(tmp_path, num_rollouts=1, warmup_steps=0)
+        assert not (tmp_path / "checked-ab-comparison.json").exists()

@@ -122,7 +122,7 @@ def assert_nvme_grad_norms(checkpoint_dir: str, mode: str, expected_count: int):
     print(f"NVMe {mode}: {len(norms)} finite, nonzero gradient norms: {norms}", flush=True)
 
 
-def execute(mode: str = "", optimizer: str = "cpu", checkpoint_dir: str = ""):
+def build_train_args(mode: str = "", optimizer: str = "cpu", checkpoint_dir: str = ""):
     ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}_torch_dist "
     checkpoint_dir_arg = quote(checkpoint_dir)
     if mode == "save":
@@ -218,12 +218,16 @@ def execute(mode: str = "", optimizer: str = "cpu", checkpoint_dir: str = ""):
         f"{misc_args} "
     )
 
+    return train_args
+
+
+def execute(mode: str = "", optimizer: str = "cpu", checkpoint_dir: str = ""):
     U.execute_train(
-        train_args=train_args,
+        train_args=build_train_args(mode, optimizer, checkpoint_dir),
         num_gpus_per_node=NUM_GPUS,
         megatron_model_type=MODEL_TYPE,
         # Expose this test-only reward hook to the Ray workers, not production code.
-        extra_env_vars={"PYTHONPATH": f"{Path(__file__).resolve().parent}:/root/Megatron-LM/"} if nvme else {},
+        extra_env_vars={"PYTHONPATH": f"{Path(__file__).resolve().parent}:/root/Megatron-LM/"} if optimizer == "nvme" else {},
     )
 
 
