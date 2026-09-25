@@ -29,6 +29,9 @@ FP16 模型训练会提前报错，因为目前没有实现其 loss-scaler check
 FP32 moment storage 已有完整模型验证，BF16 moment storage 已有组件验证；
 其他存储 dtype 未经过完整模型验证。
 
+流式模式拒绝 `--reset-optimizer-states`（只重置原 optimizer，而不是流式状态）
+和 `--load-main-params-from-ckpt`（会同时 materialize 全部 main bucket）。
+
 ## 保存与恢复
 
 使用同步 `--ckpt-format torch_dist` 保存，并保持相同模型、optimizer state dtype 和并行拓扑；

@@ -265,7 +265,19 @@ def make_vime_validate_args(**overrides):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("mode", ["bf16", "fp16", "fp32", "torch", "torch_dcp", "fsdp_dtensor"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "bf16",
+        "fp16",
+        "fp32",
+        "torch",
+        "torch_dcp",
+        "fsdp_dtensor",
+        "reset_optimizer_states",
+        "load_main_params_from_ckpt",
+    ],
+)
 def test_nvme_streaming_supported_configurations(monkeypatch, mode):
     module = load_vime_arguments_module(monkeypatch)
     args = make_vime_validate_args(
@@ -276,9 +288,15 @@ def test_nvme_streaming_supported_configurations(monkeypatch, mode):
         offload_train_disk_chunk_mb=64,
         offload_train_disk_dir="/tmp/nvme-test",
         stream_optimizer_state_moment_dtype="fp32",
+        reset_optimizer_states=mode == "reset_optimizer_states",
+        load_main_params_from_ckpt=mode == "load_main_params_from_ckpt",
+        no_load_optim=mode == "load_main_params_from_ckpt",
     )
     if mode == "bf16":
         module.vime_validate_args(args)
+    elif mode in ("reset_optimizer_states", "load_main_params_from_ckpt"):
+        with pytest.raises(AssertionError, match=mode.replace("_", "-")):
+            module.vime_validate_args(args)
     else:
         message = "BF16" if mode in ("fp16", "fp32") else "torch_dist"
         with pytest.raises(ValueError, match=message):

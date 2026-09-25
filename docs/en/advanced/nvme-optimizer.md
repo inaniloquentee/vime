@@ -34,6 +34,9 @@ loss-scaler checkpoint state is not supported. FP32 moment storage has full-mode
 BF16 moment storage has component coverage. Other storage dtypes are not covered
 by the full-model validation.
 
+Streaming rejects `--reset-optimizer-states` (it only resets the master optimizer)
+and `--load-main-params-from-ckpt` (it materializes all main buckets at once).
+
 ## Checkpoint and resume
 
 Use synchronous `--ckpt-format torch_dist` saving and resume with the same model,

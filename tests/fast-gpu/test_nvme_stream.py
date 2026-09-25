@@ -301,3 +301,13 @@ def test_legacy_checkpoint_entrypoints_are_rejected(tmp_path, monkeypatch, chain
     for operation in ("save_parameter_state", "load_parameter_state"):
         with pytest.raises(RuntimeError, match="requires torch_dist"):
             getattr(optimizer, operation)(str(tmp_path / "legacy.pt"))
+
+
+@pytest.mark.parametrize("flag", ["reset_optimizer_states", "load_main_params_from_ckpt"])
+def test_streaming_rejects_incompatible_flags_before_purge(tmp_path, monkeypatch, flag):
+    from vime_plugins.optimizers import nvme_stream as stream
+
+    args = types.SimpleNamespace(_vime_nvme_role="critic", offload_train_disk_dir=str(tmp_path), **{flag: True})
+    monkeypatch.setattr(stream, "_purge_rank_dir", lambda root: pytest.fail("must reject before clearing state"))
+    with pytest.raises(AssertionError, match=flag.replace("_", "-")):
+        stream.setup_optimizer_state_streaming(args, None)

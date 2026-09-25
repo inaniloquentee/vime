@@ -516,6 +516,11 @@ def setup_optimizer_state_streaming(args, optimizer) -> None:
     deferred storage, this function populates them directly into final bucket files, and the
     bindings keep the load path from writing into evicted storage.
     """
+    # Role-specific overrides are applied after the initial CLI validation.
+    for flag in ("reset_optimizer_states", "load_main_params_from_ckpt"):
+        assert not getattr(
+            args, flag, False
+        ), f"--stream-optimizer-state-to-disk is incompatible with --{flag.replace('_', '-')}"
     from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 
     dir_root = _state_dir_root(args)
