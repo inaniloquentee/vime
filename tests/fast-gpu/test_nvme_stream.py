@@ -137,7 +137,7 @@ def test_nvme_checkpoint_round_trip(bucket_factory, tmp_path, backend, groups, l
 
 
 @pytest.mark.parametrize("missing_payload", [False, True])
-def test_native_fp32_checkpoint_requires_resident_optimizer_state(tmp_path, cuda_device, missing_payload):
+def test_native_fp32_checkpoint_requires_resident_optimizer_state(tmp_path, cuda_device, monkeypatch, missing_payload):
     param = torch.nn.Parameter(torch.ones(32, device="cuda"))
     original = _store([], torch.optim.Adam([param], lr=1e-3))
     param.grad = torch.full_like(param, 0.25)
@@ -150,6 +150,14 @@ def test_native_fp32_checkpoint_requires_resident_optimizer_state(tmp_path, cuda
         with pytest.raises(FileNotFoundError, match="fp32_resident_optimizer.pt"):
             restored.load_from(str(tmp_path))
     else:
+        load_state_dict = restored._fp32_adam.load_state_dict
+
+        def load_cpu_state(state_dict):
+            for state in state_dict["state"].values():
+                assert all(not torch.is_tensor(value) or value.device.type == "cpu" for value in state.values())
+            return load_state_dict(state_dict)
+
+        monkeypatch.setattr(restored._fp32_adam, "load_state_dict", load_cpu_state)
         assert restored.load_from(str(tmp_path))
         for key in ("exp_avg", "exp_avg_sq", "step"):
             torch.testing.assert_close(

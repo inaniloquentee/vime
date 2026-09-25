@@ -504,7 +504,7 @@ class NVMeOptimizerStateStore:
         fp32_state = os.path.join(dirpath, "fp32_resident_optimizer.pt")
         # A missing resident-state payload must not silently restart its Adam history.
         if self._fp32_adam is not None:
-            self._fp32_adam.load_state_dict(torch.load(fp32_state))
+            self._fp32_adam.load_state_dict(torch.load(fp32_state, map_location="cpu"))
         logger.info(f"NVMe optimizer state loaded: {len(self.buckets)} buckets <- {dirpath}")
         return True
 
