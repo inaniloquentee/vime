@@ -213,11 +213,28 @@ def get_optimizer_param_scheduler(args: Namespace, optimizer: MegatronOptimizer)
     # resume), so the worst case is the cosine/linear schedule reaches its
     # plateau slightly early or late. Pass ``--lr-decay-iters`` explicitly if you
     # need exact decay control.
-    args.train_iters = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
+    total_samples = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt
+    explicit_schedule = getattr(args, "global_batch_size_schedule", None)
+    if explicit_schedule is not None:
+        # The schedule is expressed in rollouts per optimizer step. Each rollout
+        # contributes n_samples_per_prompt training samples, and the same
+        # schedule is consumed once for every rollout batch in the run.
+        args.train_iters = args.num_rollout * len(explicit_schedule)
+        scheduled_samples = args.num_rollout * sum(explicit_schedule) * args.n_samples_per_prompt
+    elif getattr(args, "variable_global_batch_size", False):
+        # Keep a trailing partial step instead of rounding it away. Megatron
+        # rejects a zero decay budget during scheduler construction.
+        args.train_iters = math.ceil(total_samples / args.global_batch_size)
+        scheduled_samples = total_samples
+    else:
+        args.train_iters = total_samples // args.global_batch_size
+        scheduled_samples = args.train_iters * args.global_batch_size
     if args.lr_decay_iters is None:
         args.lr_decay_iters = args.train_iters
-    lr_decay_steps = args.lr_decay_iters * args.global_batch_size
-    wd_incr_steps = args.train_iters * args.global_batch_size
+        lr_decay_steps = scheduled_samples
+    else:
+        lr_decay_steps = args.lr_decay_iters * args.global_batch_size
+    wd_incr_steps = scheduled_samples
     wsd_decay_steps = None
     if args.lr_wsd_decay_iters is not None:
         wsd_decay_steps = args.lr_wsd_decay_iters * args.global_batch_size

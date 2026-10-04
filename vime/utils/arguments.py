@@ -1846,6 +1846,7 @@ def _apply_megatron_role_overrides(base_args, overrides, role):
         if "disable_param_buffers_cpu_backup" not in overrides:
             role_args.disable_param_buffers_cpu_backup = False
 
+    _validate_stream_optimizer_state_args(role_args)
     return role_args
 
 
@@ -1933,6 +1934,49 @@ def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
         args.eval_prompt_data = None
 
     return eval_datasets
+
+
+def _validate_stream_optimizer_state_args(args):
+    """Validate effective role settings and fill the default NVMe directory."""
+    if not getattr(args, "stream_optimizer_state_to_disk", False):
+        return
+    for flag in ("reset_optimizer_states", "load_main_params_from_ckpt"):
+        assert not getattr(
+            args, flag, False
+        ), f"--stream-optimizer-state-to-disk is incompatible with --{flag.replace('_', '-')}"
+    if getattr(args, "fp16", False) or not getattr(args, "bf16", False):
+        raise ValueError("--stream-optimizer-state-to-disk currently requires BF16 model training")
+    if getattr(args, "ckpt_format", "torch_dist") != "torch_dist":
+        raise ValueError("--stream-optimizer-state-to-disk currently requires --ckpt-format torch_dist")
+    assert getattr(args, "optimizer", "adam").lower() == "adam", (
+        "--stream-optimizer-state-to-disk currently requires --optimizer adam"
+    )
+    assert getattr(args, "use_distributed_optimizer", True), (
+        "--stream-optimizer-state-to-disk requires --use-distributed-optimizer"
+    )
+    assert not getattr(args, "optimizer_cpu_offload", False), (
+        "--stream-optimizer-state-to-disk excludes --optimizer-cpu-offload"
+    )
+    assert not getattr(args, "offload_optimizer_states", False), (
+        "--stream-optimizer-state-to-disk excludes --offload-optimizer-states"
+    )
+    assert not getattr(args, "async_save", False), (
+        "--stream-optimizer-state-to-disk currently requires synchronous checkpoint saving"
+    )
+    chunk_mb = getattr(args, "offload_train_disk_chunk_mb", 64)
+    assert chunk_mb > 0, "--offload-train-disk-chunk-mb must be positive"
+    args.offload_train_disk_chunk_mb = chunk_mb
+    if getattr(args, "offload_train_disk_dir", None) is None:
+        uid = os.environ.get("VIME_RUN_ID", str(os.getpid()))
+        args.offload_train_disk_dir = os.path.join(
+            os.environ.get("SCRATCH", "/tmp"), f"vime_train_offload_{uid}"
+        )
+    logger.info(
+        "Streaming optimizer state through NVMe: dir=%s, chunk=%d MiB, moments=%s",
+        args.offload_train_disk_dir,
+        args.offload_train_disk_chunk_mb,
+        getattr(args, "stream_optimizer_state_moment_dtype", "bf16"),
+    )
 
 
 def vime_validate_args(args):
@@ -2041,40 +2085,7 @@ def vime_validate_args(args):
         if args.log_probs_max_tokens_per_gpu is None:
             args.log_probs_max_tokens_per_gpu = args.max_tokens_per_gpu
 
-    if getattr(args, "stream_optimizer_state_to_disk", False):
-        for flag in ("reset_optimizer_states", "load_main_params_from_ckpt"):
-            assert not getattr(
-                args, flag, False
-            ), f"--stream-optimizer-state-to-disk is incompatible with --{flag.replace('_', '-')}"
-        if getattr(args, "fp16", False) or not getattr(args, "bf16", False):
-            raise ValueError("--stream-optimizer-state-to-disk currently requires BF16 model training")
-        if getattr(args, "ckpt_format", "torch_dist") != "torch_dist":
-            raise ValueError("--stream-optimizer-state-to-disk currently requires --ckpt-format torch_dist")
-        assert (
-            getattr(args, "optimizer", "adam").lower() == "adam"
-        ), "--stream-optimizer-state-to-disk currently requires --optimizer adam"
-        assert getattr(
-            args, "use_distributed_optimizer", True
-        ), "--stream-optimizer-state-to-disk requires --use-distributed-optimizer"
-        assert not getattr(
-            args, "optimizer_cpu_offload", False
-        ), "--stream-optimizer-state-to-disk excludes --optimizer-cpu-offload"
-        assert not getattr(
-            args, "offload_optimizer_states", False
-        ), "--stream-optimizer-state-to-disk excludes --offload-optimizer-states"
-        assert not getattr(
-            args, "async_save", False
-        ), "--stream-optimizer-state-to-disk currently requires synchronous checkpoint saving"
-        assert args.offload_train_disk_chunk_mb > 0, "--offload-train-disk-chunk-mb must be positive"
-        if args.offload_train_disk_dir is None:
-            uid = os.environ.get("VIME_RUN_ID", str(os.getpid()))
-            args.offload_train_disk_dir = os.path.join(os.environ.get("SCRATCH", "/tmp"), f"vime_train_offload_{uid}")
-        logger.info(
-            "Streaming optimizer state through NVMe: dir=%s, chunk=%d MiB, moments=%s",
-            args.offload_train_disk_dir,
-            args.offload_train_disk_chunk_mb,
-            args.stream_optimizer_state_moment_dtype,
-        )
+    _validate_stream_optimizer_state_args(args)
 
     if getattr(args, "balance_by_flops", False):
         assert args.use_dynamic_batch_size, "--balance-by-flops requires --use-dynamic-batch-size"
@@ -2189,12 +2200,18 @@ def vime_validate_args(args):
         args.eval_function_path = args.rollout_function_path
 
     if getattr(args, "global_batch_size_schedule", None) is not None:
-        try:
-            args.global_batch_size_schedule = [
-                int(item.strip()) for item in args.global_batch_size_schedule.split(",") if item.strip()
-            ]
-        except ValueError as exc:
-            raise ValueError("--global-batch-size-schedule must be comma-separated positive integers") from exc
+        schedule = args.global_batch_size_schedule
+        if isinstance(schedule, str):
+            try:
+                schedule = [int(item.strip()) for item in schedule.split(",") if item.strip()]
+            except ValueError as exc:
+                raise ValueError("--global-batch-size-schedule must be comma-separated positive integers") from exc
+        else:
+            try:
+                schedule = [int(item) for item in schedule]
+            except (TypeError, ValueError) as exc:
+                raise ValueError("--global-batch-size-schedule must be a sequence of positive integers") from exc
+        args.global_batch_size_schedule = schedule
         assert args.global_batch_size_schedule and all(
             item > 0 for item in args.global_batch_size_schedule
         ), "--global-batch-size-schedule must contain positive integers"

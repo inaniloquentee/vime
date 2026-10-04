@@ -265,6 +265,41 @@ def make_vime_validate_args(**overrides):
 
 
 @pytest.mark.unit
+def test_critic_streaming_override_fills_default_directory(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = types.SimpleNamespace(
+        kl_coef=0.1,
+        use_opd=True,
+        custom_advantage_function_path="custom.adv",
+        untie_embeddings_and_output_weights=False,
+        disable_param_buffers_cpu_backup=True,
+        stream_optimizer_state_to_disk=False,
+        bf16=True,
+        fp16=False,
+        ckpt_format="torch_dist",
+        optimizer="adam",
+        use_distributed_optimizer=True,
+        optimizer_cpu_offload=False,
+        offload_optimizer_states=False,
+        async_save=False,
+        reset_optimizer_states=False,
+        load_main_params_from_ckpt=False,
+        offload_train_disk_chunk_mb=64,
+        offload_train_disk_dir=None,
+        stream_optimizer_state_moment_dtype="bf16",
+    )
+    monkeypatch.setenv("SCRATCH", "/scratch")
+    monkeypatch.setenv("VIME_RUN_ID", "role-test")
+
+    critic_args = module._apply_megatron_role_overrides(
+        args, {"stream_optimizer_state_to_disk": True}, role="critic"
+    )
+
+    assert critic_args.stream_optimizer_state_to_disk is True
+    assert critic_args.offload_train_disk_dir == "/scratch/vime_train_offload_role-test"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "mode",
     [
@@ -301,6 +336,18 @@ def test_nvme_streaming_supported_configurations(monkeypatch, mode):
         message = "BF16" if mode in ("fp16", "fp32") else "torch_dist"
         with pytest.raises(ValueError, match=message):
             module.vime_validate_args(args)
+
+
+@pytest.mark.unit
+def test_vime_validate_args_accepts_programmatic_global_batch_schedule(monkeypatch):
+    module = load_vime_arguments_module(monkeypatch)
+    args = make_vime_validate_args(global_batch_size_schedule=[2, 4])
+
+    module.vime_validate_args(args)
+
+    assert args.global_batch_size_schedule == [2, 4]
+    assert args.global_batch_size == 2
+    assert args.variable_global_batch_size is True
 
 
 @pytest.mark.unit

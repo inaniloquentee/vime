@@ -75,8 +75,12 @@ def _reserve(fd: int, nbytes: int) -> None:
     Sizing a file with ftruncate alone leaves it sparse: the mapping succeeds and the
     process dies on SIGBUS at first touch instead, with nothing to point at.
     """
+    posix_fallocate = getattr(os, "posix_fallocate", None)
+    if posix_fallocate is None:
+        os.ftruncate(fd, nbytes)
+        return
     try:
-        os.posix_fallocate(fd, 0, nbytes)
+        posix_fallocate(fd, 0, nbytes)
     except OSError as e:
         if e.errno not in (errno.EOPNOTSUPP, errno.ENOTSUP, errno.EINVAL):
             raise
@@ -272,7 +276,7 @@ class NVMeOptimizerStateStore:
             )
         self.dtypes = {"main": torch.float32, "exp_avg": DTYPES[moments], "exp_avg_sq": DTYPES[moments]}
 
-        self._rank = torch.distributed.get_rank()
+        self._rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         self._instance = distrib_optimizer.distributed_optimizer_instance_id
         self.dir = os.path.join(dir_root, self.relative_dir)
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -398,7 +402,10 @@ class NVMeOptimizerStateStore:
                 entry.main_param.copy_(source_shard)
             written += bucket.flush(segments=("main",))
             os.fdatasync(bucket.fd)
-            os.posix_fadvise(bucket.fd, 0, bucket.offsets["exp_avg"][0], os.POSIX_FADV_DONTNEED)
+            posix_fadvise = getattr(os, "posix_fadvise", None)
+            dontneed = getattr(os, "POSIX_FADV_DONTNEED", None)
+            if posix_fadvise is not None and dontneed is not None:
+                posix_fadvise(bucket.fd, 0, bucket.offsets["exp_avg"][0], dontneed)
         return written
 
     @torch.no_grad()
@@ -440,6 +447,7 @@ class NVMeOptimizerStateStore:
             ],
         }
         for bucket in self.buckets:
+            os.fdatasync(bucket.fd)
             shutil.copyfile(bucket.path, os.path.join(dirpath, os.path.basename(bucket.path)))
         if self._fp32_adam is not None:
             torch.save(self._fp32_adam.state_dict(), os.path.join(dirpath, "fp32_resident_optimizer.pt"))
@@ -577,7 +585,8 @@ def _purge_rank_dir(dir_root: str) -> str:
     so clearing it whole is safe, and it must happen before the chained dense and
     expert stores are constructed, since they share it.
     """
-    rank_dir = os.path.join(dir_root, f"rank{torch.distributed.get_rank():05d}")
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    rank_dir = os.path.join(dir_root, f"rank{rank:05d}")
     shutil.rmtree(rank_dir, ignore_errors=True)
     os.makedirs(rank_dir, exist_ok=True)
     return rank_dir

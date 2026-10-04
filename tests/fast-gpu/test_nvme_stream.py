@@ -238,6 +238,50 @@ def test_checkpoint_wrapper_saves_streamed_state_before_tracker(tmp_path, monkey
     assert events[0][1].endswith("iter_0000003")
 
 
+def test_checkpoint_wrapper_restores_only_stores_with_state(tmp_path, monkeypatch):
+    checkpointing = _load_checkpoint_wrapper()
+    events = []
+
+    class Store:
+        def __init__(self, name, loaded):
+            self.name = name
+            self.loaded = loaded
+
+        def load_from(self, base):
+            events.append(("load", self.name, base))
+            return self.loaded
+
+        def restore_main_to_model_params(self):
+            events.append(("restore", self.name))
+
+    args = types.SimpleNamespace(
+        load=str(tmp_path),
+        no_load_optim=False,
+        finetune=False,
+        ckpt_step=None,
+    )
+    (tmp_path / "latest_checkpointed_iteration.txt").write_text("3")
+    optimizer = types.SimpleNamespace(
+        chained_optimizers=[
+            types.SimpleNamespace(_nvme_state_store=Store("loaded", True)),
+            types.SimpleNamespace(_nvme_state_store=Store("missing", False)),
+        ]
+    )
+    monkeypatch.setattr(checkpointing, "get_args", lambda: args)
+    monkeypatch.setattr(
+        checkpointing,
+        "_load_checkpoint_megatron",
+        lambda **kwargs: (3, 0),
+    )
+
+    assert checkpointing.load_checkpoint(None, optimizer, None, None) == (3, 0)
+    assert [event[0:2] for event in events] == [
+        ("load", "loaded"),
+        ("load", "missing"),
+        ("restore", "loaded"),
+    ]
+
+
 @pytest.mark.parametrize(
     "mode,iteration,load_optimizer",
     [

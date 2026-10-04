@@ -123,7 +123,12 @@ def _should_load_nvme_optimizer(args, load_path):
     # Megatron also skips optimizer state for a release checkpoint. Its returned
     # iteration is zero, which alone cannot distinguish release from a valid
     # iteration-zero training checkpoint.
-    tracker = Path(load_path) / "latest_checkpointed_iteration.txt"
+    load_path = Path(load_path)
+    # A direct release-directory load has no tracker file inside that
+    # directory. Treat it like Megatron's release checkpoint path explicitly.
+    if load_path.name == "release":
+        return False
+    tracker = load_path / "latest_checkpointed_iteration.txt"
     return not (tracker.is_file() and tracker.read_text().strip() == "release")
 
 
@@ -185,10 +190,13 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
         if stores and result[0] is not None and _should_load_nvme_optimizer(args, load_path):
             base = _checkpoint_base(load_path, result[0])
             loaded = [store.load_from(base) for store in stores]
-            if any(loaded):
-                # The model shard has already been restored by Megatron. Restore the
-                # checkpointed FP32 mains directly so their extra precision survives.
-                for store in stores:
+            # Only stores with checkpoint data may overwrite the model buffer. A
+            # store returning False is intentionally starting fresh and its main
+            # storage is not initialized from this checkpoint.
+            for store, did_load in zip(stores, loaded, strict=True):
+                if did_load:
+                    # The model shard has already been restored by Megatron. Restore
+                    # checkpointed FP32 mains directly so their extra precision survives.
                     store.restore_main_to_model_params()
         return result
     else:
