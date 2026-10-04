@@ -338,7 +338,7 @@ class NVMeOptimizerStateStore:
         return sorted(params), self._adam_for(params)
 
     def _adam_for(self, params_by_group: dict[int, list[torch.Tensor]]):
-        from megatron.core.optimizer import Adam
+        from megatron.core.optimizer import USING_PYTORCH_OPTIMIZER, Adam
 
         master_groups = self.dist_opt.optimizer.param_groups
         groups = []
@@ -346,7 +346,18 @@ class NVMeOptimizerStateStore:
             group = {k: v for k, v in master_groups[group_index].items() if k != "params"}
             group["params"] = params_by_group[group_index]
             groups.append(group)
-        return Adam(groups, adam_w_mode=self.dist_opt.config.decoupled_weight_decay)
+        decoupled_weight_decay = self.dist_opt.config.decoupled_weight_decay
+        if USING_PYTORCH_OPTIMIZER:
+            # Megatron aliases Adam to torch.optim.AdamW when neither Apex nor
+            # Transformer Engine is installed. Torch's optimizers do not accept
+            # Megatron's adam_w_mode argument, and AdamW would silently apply
+            # the wrong weight-decay semantics when decoupled mode is disabled.
+            # Newer PyTorch versions also persist this flag in each group.
+            for group in groups:
+                group.pop("decoupled_weight_decay", None)
+            optimizer_cls = torch.optim.AdamW if decoupled_weight_decay else torch.optim.Adam
+            return optimizer_cls(groups)
+        return Adam(groups, adam_w_mode=decoupled_weight_decay)
 
     def _sync_lr_wd(self, adam, group_indices) -> None:
         master_groups = self.dist_opt.optimizer.param_groups
@@ -505,10 +516,12 @@ class NVMeOptimizerStateStore:
             if state_steps:
                 assert len(state_steps) == len(bucket.entries)
                 for entry, step in zip(bucket.entries, state_steps, strict=True):
-                    if step:
-                        bucket.adam.state.setdefault(entry.main_param, {})["step"] = torch.tensor(
-                            step, dtype=torch.float32, device=entry.main_param.device
-                        )
+                    # Zero is a valid counter for a checkpoint taken before the
+                    # first update. Moments are already allocated above, so Adam
+                    # will not run its lazy state initialization on the next step.
+                    bucket.adam.state.setdefault(entry.main_param, {})["step"] = torch.tensor(
+                        step, dtype=torch.float32, device=entry.main_param.device
+                    )
         fp32_state = os.path.join(dirpath, "fp32_resident_optimizer.pt")
         # A missing resident-state payload must not silently restart its Adam history.
         if self._fp32_adam is not None:

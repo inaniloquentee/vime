@@ -3,6 +3,7 @@ import copy
 import json
 import logging
 import os
+from collections.abc import Sequence
 from typing import Any
 
 import yaml
@@ -733,7 +734,7 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=(
                     "Optional comma-separated rollout counts per optimizer step, e.g. 8,8,4. "
-                    "The entries must cover exactly the rollout batch when variable global batching is enabled."
+                    "Entries must cover all actual rollout groups (normally rollout_batch_size * n_samples_per_prompt)."
                 ),
             )
             parser.add_argument(
@@ -741,8 +742,8 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 type=int,
                 default=None,
                 help=(
-                    "Number of steps per rollout, e.g. It is equivalent to setting gbs as "
-                    "`rollout_batch_size * n_samples_per_prompt // num_steps_per_rollout`."
+                    "Number of steps per rollout. Fixed batching derives global batch size with floor division; "
+                    "variable batching uses ceiling division. Use --global-batch-size-schedule for uneven steps."
                 ),
             )
             # mbs for the training, will be ignored if `use_dynamic_batch_size` is set.
@@ -1265,9 +1266,8 @@ def get_vime_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
                 default=False,
                 help=(
-                    "Whether to always use train step as the step metric in wandb. "
-                    "If set, we will always use the train steps for wandb logging, "
-                    "otherwise, will use rollout step for most info other than train/*. "
+                    "Use estimated consumed rollout groups as the logging axis for rollout metrics, "
+                    "matching the training-progress axis. Otherwise, use rollout ids for non-train metrics."
                 ),
             )
             parser.add_argument(
@@ -1821,6 +1821,18 @@ def _apply_megatron_role_overrides(base_args, overrides, role):
     # Apply overrides from the YAML config.
     # Unspecified keys inherit from base_args via deepcopy.
     for key, value in overrides.items():
+        if key in {
+            "global_batch_size",
+            "global_batch_size_schedule",
+            "variable_global_batch_size",
+            "rollout_batch_size",
+            "n_samples_per_prompt",
+            "num_rollout",
+        }:
+            raise ValueError(
+                f"{role} config cannot override '{key}': batch settings are shared with the rollout manager; "
+                "set them in the CLI args."
+            )
         if key in ignored_keys:
             logger.info(f"Ignoring {role} config key '{key}'; GPU allocation always follows CLI args.")
             continue
@@ -1948,29 +1960,27 @@ def _validate_stream_optimizer_state_args(args):
         raise ValueError("--stream-optimizer-state-to-disk currently requires BF16 model training")
     if getattr(args, "ckpt_format", "torch_dist") != "torch_dist":
         raise ValueError("--stream-optimizer-state-to-disk currently requires --ckpt-format torch_dist")
-    assert getattr(args, "optimizer", "adam").lower() == "adam", (
-        "--stream-optimizer-state-to-disk currently requires --optimizer adam"
-    )
-    assert getattr(args, "use_distributed_optimizer", True), (
-        "--stream-optimizer-state-to-disk requires --use-distributed-optimizer"
-    )
-    assert not getattr(args, "optimizer_cpu_offload", False), (
-        "--stream-optimizer-state-to-disk excludes --optimizer-cpu-offload"
-    )
-    assert not getattr(args, "offload_optimizer_states", False), (
-        "--stream-optimizer-state-to-disk excludes --offload-optimizer-states"
-    )
-    assert not getattr(args, "async_save", False), (
-        "--stream-optimizer-state-to-disk currently requires synchronous checkpoint saving"
-    )
+    assert (
+        getattr(args, "optimizer", "adam").lower() == "adam"
+    ), "--stream-optimizer-state-to-disk currently requires --optimizer adam"
+    assert getattr(
+        args, "use_distributed_optimizer", True
+    ), "--stream-optimizer-state-to-disk requires --use-distributed-optimizer"
+    assert not getattr(
+        args, "optimizer_cpu_offload", False
+    ), "--stream-optimizer-state-to-disk excludes --optimizer-cpu-offload"
+    assert not getattr(
+        args, "offload_optimizer_states", False
+    ), "--stream-optimizer-state-to-disk excludes --offload-optimizer-states"
+    assert not getattr(
+        args, "async_save", False
+    ), "--stream-optimizer-state-to-disk currently requires synchronous checkpoint saving"
     chunk_mb = getattr(args, "offload_train_disk_chunk_mb", 64)
     assert chunk_mb > 0, "--offload-train-disk-chunk-mb must be positive"
     args.offload_train_disk_chunk_mb = chunk_mb
     if getattr(args, "offload_train_disk_dir", None) is None:
         uid = os.environ.get("VIME_RUN_ID", str(os.getpid()))
-        args.offload_train_disk_dir = os.path.join(
-            os.environ.get("SCRATCH", "/tmp"), f"vime_train_offload_{uid}"
-        )
+        args.offload_train_disk_dir = os.path.join(os.environ.get("SCRATCH", "/tmp"), f"vime_train_offload_{uid}")
     logger.info(
         "Streaming optimizer state through NVMe: dir=%s, chunk=%d MiB, moments=%s",
         args.offload_train_disk_dir,
@@ -1979,7 +1989,42 @@ def _validate_stream_optimizer_state_args(args):
     )
 
 
+def _normalize_global_batch_size_schedule(args):
+    schedule = getattr(args, "global_batch_size_schedule", None)
+    if schedule is None:
+        return
+    if isinstance(schedule, str):
+        try:
+            schedule = [int(item.strip()) for item in schedule.split(",")]
+        except ValueError as exc:
+            raise ValueError("--global-batch-size-schedule must be comma-separated positive integers") from exc
+    else:
+        if not isinstance(schedule, Sequence) or isinstance(schedule, (bytes, bytearray)):
+            raise ValueError("--global-batch-size-schedule must be a sequence of positive integers")
+        try:
+            if any(isinstance(item, bool) or not isinstance(item, (int, str)) for item in schedule):
+                raise ValueError
+            schedule = [int(item) for item in schedule]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("--global-batch-size-schedule must be a sequence of positive integers") from exc
+    assert schedule and all(
+        item > 0 for item in schedule
+    ), "--global-batch-size-schedule must contain positive integers"
+    args.global_batch_size_schedule = schedule
+    if args.global_batch_size is None:
+        args.global_batch_size = schedule[0]
+    args.variable_global_batch_size = True
+
+
 def vime_validate_args(args):
+    if args.custom_config_path:
+        with open(args.custom_config_path) as f:
+            data = yaml.safe_load(f) or {}
+        for k, v in data.items():
+            if hasattr(args, k):
+                logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
+            setattr(args, k, v)
+
     args.eval_datasets = _resolve_eval_datasets(args)
     args.dspark_enabled = (getattr(args, "vllm_speculative_config", None) or {}).get("method") == "dspark"
 
@@ -2199,35 +2244,51 @@ def vime_validate_args(args):
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
 
-    if getattr(args, "global_batch_size_schedule", None) is not None:
-        schedule = args.global_batch_size_schedule
-        if isinstance(schedule, str):
-            try:
-                schedule = [int(item.strip()) for item in schedule.split(",") if item.strip()]
-            except ValueError as exc:
-                raise ValueError("--global-batch-size-schedule must be comma-separated positive integers") from exc
-        else:
-            try:
-                schedule = [int(item) for item in schedule]
-            except (TypeError, ValueError) as exc:
-                raise ValueError("--global-batch-size-schedule must be a sequence of positive integers") from exc
-        args.global_batch_size_schedule = schedule
-        assert args.global_batch_size_schedule and all(
-            item > 0 for item in args.global_batch_size_schedule
-        ), "--global-batch-size-schedule must contain positive integers"
-        if args.global_batch_size is None:
-            args.global_batch_size = args.global_batch_size_schedule[0]
-        args.variable_global_batch_size = True
+    _normalize_global_batch_size_schedule(args)
+
+    num_samples = args.rollout_batch_size * args.n_samples_per_prompt
+    if (
+        args.global_batch_size_schedule is not None
+        and args.rollout_function_path == "vime.rollout.vllm_rollout.generate_rollout"
+        and not getattr(args, "custom_generate_function_path", None)
+        and not getattr(args, "rollout_sample_hook_path", None)
+        and not getattr(args, "custom_convert_samples_to_train_data_path", None)
+        and not args.load_debug_rollout_data
+        and sum(args.global_batch_size_schedule) != num_samples
+    ):
+        raise ValueError("--global-batch-size-schedule must cover all rollout groups")
 
     if args.num_steps_per_rollout is not None:
-        global_batch_size = args.rollout_batch_size * args.n_samples_per_prompt // args.num_steps_per_rollout
-        if args.global_batch_size is not None:
-            assert args.global_batch_size == global_batch_size, (
-                f"global_batch_size {args.global_batch_size} is not equal to "
-                f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
-                f"// num_steps_per_rollout {args.num_steps_per_rollout}"
-            )
-        args.global_batch_size = global_batch_size
+        num_steps = args.num_steps_per_rollout
+        if num_steps <= 0:
+            raise ValueError("--num-steps-per-rollout must be positive")
+        if args.global_batch_size_schedule is not None:
+            if len(args.global_batch_size_schedule) != num_steps:
+                raise ValueError("--num-steps-per-rollout must match --global-batch-size-schedule length")
+        else:
+            if num_steps > num_samples:
+                raise ValueError("--num-steps-per-rollout cannot exceed the number of nominal rollout groups")
+            if args.variable_global_batch_size:
+                if args.global_batch_size is None:
+                    args.global_batch_size = (num_samples + num_steps - 1) // num_steps
+            else:
+                global_batch_size = num_samples // num_steps
+                if args.global_batch_size is not None:
+                    assert args.global_batch_size == global_batch_size, (
+                        f"global_batch_size {args.global_batch_size} is not equal to "
+                        f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
+                        f"// num_steps_per_rollout {num_steps}"
+                    )
+                args.global_batch_size = global_batch_size
+            if args.global_batch_size <= 0:
+                raise ValueError("--global-batch-size must be positive")
+            full_steps, remainder = divmod(num_samples, args.global_batch_size)
+            actual_steps = full_steps + bool(remainder and args.variable_global_batch_size)
+            if actual_steps != num_steps:
+                raise ValueError(
+                    "--num-steps-per-rollout requires a compatible global batch size; "
+                    "use --global-batch-size-schedule for uneven steps"
+                )
 
     if args.n_samples_per_prompt == 1:
         args.grpo_std_normalization = False
@@ -2260,14 +2321,6 @@ def vime_validate_args(args):
 
     if args.use_rollout_routing_replay:
         args.use_routing_replay = True
-
-    if args.custom_config_path:
-        with open(args.custom_config_path) as f:
-            data = yaml.safe_load(f) or {}
-        for k, v in data.items():
-            if hasattr(args, k):
-                logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
-            setattr(args, k, v)
 
     if args.eval_max_context_len is None:
         logger.info(

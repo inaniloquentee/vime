@@ -213,35 +213,44 @@ def get_optimizer_param_scheduler(args: Namespace, optimizer: MegatronOptimizer)
     # resume), so the worst case is the cosine/linear schedule reaches its
     # plateau slightly early or late. Pass ``--lr-decay-iters`` explicitly if you
     # need exact decay control.
-    total_samples = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt
+    samples_per_rollout = args.rollout_batch_size * args.n_samples_per_prompt
     explicit_schedule = getattr(args, "global_batch_size_schedule", None)
     if explicit_schedule is not None:
-        # The schedule is expressed in rollouts per optimizer step. Each rollout
-        # contributes n_samples_per_prompt training samples, and the same
-        # schedule is consumed once for every rollout batch in the run.
+        # Entries count generated rollouts (sample.index), so they already
+        # include n_samples_per_prompt. The schedule repeats each rollout batch.
+        step_sizes = explicit_schedule
         args.train_iters = args.num_rollout * len(explicit_schedule)
-        scheduled_samples = args.num_rollout * sum(explicit_schedule) * args.n_samples_per_prompt
     elif getattr(args, "variable_global_batch_size", False):
         # Keep a trailing partial step instead of rounding it away. Megatron
         # rejects a zero decay budget during scheduler construction.
-        args.train_iters = math.ceil(total_samples / args.global_batch_size)
-        scheduled_samples = total_samples
+        full_steps, remainder = divmod(samples_per_rollout, args.global_batch_size)
+        step_sizes = [args.global_batch_size] * full_steps
+        if remainder:
+            step_sizes.append(remainder)
+        args.train_iters = args.num_rollout * len(step_sizes)
     else:
-        args.train_iters = total_samples // args.global_batch_size
-        scheduled_samples = args.train_iters * args.global_batch_size
+        step_sizes = [args.global_batch_size]
+        args.train_iters = args.num_rollout * (samples_per_rollout // args.global_batch_size)
+
+    samples_per_cycle = sum(step_sizes)
+
+    def samples_for_iters(iters):
+        cycles, remaining = divmod(iters, len(step_sizes))
+        return cycles * samples_per_cycle + sum(step_sizes[:remaining])
+
+    scheduled_samples = samples_for_iters(args.train_iters)
     if args.lr_decay_iters is None:
         args.lr_decay_iters = args.train_iters
-        lr_decay_steps = scheduled_samples
-    else:
-        lr_decay_steps = args.lr_decay_iters * args.global_batch_size
+    lr_decay_steps = samples_for_iters(args.lr_decay_iters)
     wd_incr_steps = scheduled_samples
     wsd_decay_steps = None
     if args.lr_wsd_decay_iters is not None:
-        wsd_decay_steps = args.lr_wsd_decay_iters * args.global_batch_size
+        wsd_start_iter = max(0, args.lr_decay_iters - args.lr_wsd_decay_iters)
+        wsd_decay_steps = lr_decay_steps - samples_for_iters(wsd_start_iter)
     if args.lr_warmup_fraction is not None:
         lr_warmup_steps = args.lr_warmup_fraction * lr_decay_steps
     else:
-        lr_warmup_steps = args.lr_warmup_iters * args.global_batch_size
+        lr_warmup_steps = samples_for_iters(args.lr_warmup_iters)
 
     opt_param_scheduler = OptimizerParamScheduler(
         optimizer,
@@ -905,6 +914,9 @@ def train(
 
     # Run training iterations till done.
     for step_id in range(num_steps_per_rollout):
+        # Use persisted scheduler progress as the logging axis. Read it before
+        # the step so skipped optimizer updates cannot make the axis go backward.
+        accumulated_step_id = opt_param_scheduler.num_steps
 
         # Run training step.
         loss_dict, grad_norm = train_one_step(
@@ -956,7 +968,6 @@ def train(
             and mpu.get_tensor_model_parallel_rank() == 0
             and mpu.get_pipeline_model_parallel_rank() == mpu.get_pipeline_model_parallel_world_size() - 1
         ):
-            accumulated_step_id = rollout_id * num_steps_per_rollout + step_id
             role = getattr(model[0], "role", "actor")
             role_tag = "" if role == "actor" else f"{role}-"
             log_dict = {

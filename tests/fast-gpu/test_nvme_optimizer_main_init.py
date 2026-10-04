@@ -111,6 +111,7 @@ def test_real_megatron_constructor_handles_and_peak(megatron_world, deferred):
     optimizer = get_megatron_optimizer(
         OptimizerConfig(
             optimizer="adam",
+            lr=1e-3,
             bf16=True,
             use_distributed_optimizer=True,
             defer_main_param_initialization=deferred,
@@ -134,6 +135,62 @@ def test_real_megatron_constructor_handles_and_peak(megatron_world, deferred):
     else:
         assert peak_delta >= full_bytes, peak_delta
     print(f"Megatron constructor: deferred={deferred} full_main_bytes={full_bytes} peak_delta={peak_delta}")
+
+
+@requires_cuda
+def test_real_megatron_streaming_step_matches_resident_optimizer(megatron_world, tmp_path):
+    import copy
+
+    from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
+    from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
+    from megatron.core.transformer import TransformerConfig
+
+    original = torch.nn.Sequential(torch.nn.Linear(16, 16, bias=False)).bfloat16().cuda()
+    models, optimizers = [], []
+    for deferred in (False, True):
+        model = DistributedDataParallel(
+            TransformerConfig(num_attention_heads=1, num_layers=1),
+            DistributedDataParallelConfig(use_distributed_optimizer=True),
+            copy.deepcopy(original),
+        )
+        optimizer = get_megatron_optimizer(
+            OptimizerConfig(
+                optimizer="adam",
+                lr=0.01,
+                weight_decay=0.1,
+                adam_beta2=0.95,
+                bf16=True,
+                use_distributed_optimizer=True,
+                defer_main_param_initialization=deferred,
+            ),
+            [model],
+        )
+        if deferred:
+            stream.setup_optimizer_state_streaming(
+                SimpleNamespace(
+                    offload_train_disk_dir=str(tmp_path),
+                    offload_train_disk_chunk_mb=1,
+                    stream_optimizer_state_moment_dtype="fp32",
+                ),
+                optimizer,
+            )
+        models.append(model)
+        optimizers.append(optimizer)
+
+    try:
+        for gradient in (0.25, -0.125, 0.5):
+            for model, optimizer in zip(models, optimizers, strict=True):
+                for param in model.parameters():
+                    param.main_grad.fill_(gradient)
+                assert optimizer.step()[0]
+            for resident, streamed in zip(models[0].parameters(), models[1].parameters(), strict=True):
+                torch.testing.assert_close(resident, streamed, atol=0, rtol=0)
+        store = optimizers[1].chained_optimizers[0]._nvme_state_store
+        for bucket in store.buckets:
+            assert all(entry.main_param.untyped_storage().nbytes() == 0 for entry in bucket.entries)
+    finally:
+        for bucket in optimizers[1].chained_optimizers[0]._nvme_state_store.buckets:
+            bucket.close()
 
 
 def test_short_io_retries_and_eof_fails():

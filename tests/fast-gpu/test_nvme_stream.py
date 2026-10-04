@@ -47,6 +47,39 @@ def bucket_factory(tmp_path, cuda_device):
         bucket.close()
 
 
+@pytest.mark.parametrize(
+    "decoupled_weight_decay, expected_optimizer",
+    [(True, torch.optim.AdamW), (False, torch.optim.Adam)],
+)
+def test_adam_for_torch_fallback_selects_weight_decay_semantics(
+    monkeypatch, decoupled_weight_decay, expected_optimizer
+):
+    import megatron.core.optimizer as megatron_optimizer
+
+    monkeypatch.setattr(megatron_optimizer, "USING_PYTORCH_OPTIMIZER", True)
+    param = torch.nn.Parameter(torch.ones(4))
+    master = torch.optim.AdamW([param], lr=0.01, betas=(0.8, 0.95), eps=1e-6, weight_decay=0.1)
+    store = object.__new__(NVMeOptimizerStateStore)
+    store.dist_opt = types.SimpleNamespace(
+        optimizer=master,
+        config=types.SimpleNamespace(decoupled_weight_decay=decoupled_weight_decay),
+    )
+
+    actual = store._adam_for({0: [param]})
+
+    assert type(actual) is expected_optimizer
+    assert actual.param_groups[0]["params"] == [param]
+    reference = torch.nn.Parameter(param.detach().clone())
+    expected = expected_optimizer([reference], lr=0.01, betas=(0.8, 0.95), eps=1e-6, weight_decay=0.1)
+    for gradient in (0.2, 0.7, -0.3):
+        param.grad = torch.full_like(param, gradient)
+        reference.grad = param.grad.clone()
+        actual.step()
+        expected.step()
+    _assert_optimizer_equal(actual, [param], expected, [reference])
+    assert master.param_groups[0]["params"] == [param]
+
+
 def _store(buckets, resident=None):
     store = object.__new__(NVMeOptimizerStateStore)
     store._rank = store._instance = store.uid = 0
@@ -111,9 +144,20 @@ def test_nvme_checkpoint_round_trip(bucket_factory, tmp_path, backend, groups, l
         param.grad = torch.full_like(param, 0.25)
     adam.step()
     if legacy:
-        # Distinct counters expose wrong aliases as well as out-of-range indexing.
+        # Legacy manifests only carried group counters. Keep the live
+        # per-parameter counters consistent with those counters so this
+        # exercises the fallback mapping without manufacturing an
+        # impossible optimizer state.
         for index, group in enumerate(adam.param_groups):
-            group["step"] = 2 + index * 3
+            step = 2 + index * 3
+            group["step"] = step
+            for param in group["params"]:
+                if "step" in adam.state[param]:
+                    counter = adam.state[param]["step"]
+                    if torch.is_tensor(counter):
+                        counter.fill_(step)
+                    else:
+                        adam.state[param]["step"] = step
     bucket.flush()
     store = _store([bucket])
     checkpoint = tmp_path / "checkpoint"
@@ -134,6 +178,24 @@ def test_nvme_checkpoint_round_trip(bucket_factory, tmp_path, backend, groups, l
     adam.step()
     restored_adam.step()
     _assert_optimizer_equal(restored_adam, restored_params, adam, params)
+
+
+def test_nvme_checkpoint_before_first_step_can_resume(bucket_factory, tmp_path):
+    initial = torch.linspace(-2.0, 2.0, 64)
+    params, adam, bucket = bucket_factory("fresh", initial)
+    restored_params, restored_adam, restored_bucket = bucket_factory("fresh_restored", initial)
+    bucket.flush(segments=("main",))
+    store = _store([bucket])
+    store.save_to(str(tmp_path / "initial_checkpoint"))
+    assert _store([restored_bucket]).load_from(str(tmp_path / "initial_checkpoint"))
+    bucket.fetch()
+    restored_bucket.fetch()
+    for original, restored in zip(params, restored_params, strict=True):
+        original.grad = torch.full_like(original, 0.25)
+        restored.grad = original.grad.clone()
+    adam.step()
+    restored_adam.step()
+    _assert_optimizer_equal(adam, params, restored_adam, restored_params)
 
 
 @pytest.mark.parametrize("missing_payload", [False, True])
