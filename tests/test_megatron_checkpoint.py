@@ -143,10 +143,15 @@ def test_nvme_checkpoint_syncs_payload_manifest_and_directories(tmp_path, monkey
         expected.append(directory / "fp32_resident_optimizer.pt")
     expected.extend([manifest, directory, directory.parent, base, checkpoint])
     assert synced == expected
+    with pytest.raises(FileExistsError, match="Refusing to overwrite NVMe optimizer checkpoint"):
+        store.save_to(str(base))
+    assert payload.read_bytes() == source.read_bytes()
+    assert synced == expected
 
 
 def test_nvme_checkpoint_fsync_failure_prevents_manifest(tmp_path, monkeypatch):
     stream = load_nvme_store_module(monkeypatch)
+    native_fsync = os.fsync
     source = tmp_path / "scratch.bin"
     source.write_bytes(b"optimizer state")
     checkpoint = tmp_path / "checkpoint"
@@ -171,7 +176,11 @@ def test_nvme_checkpoint_fsync_failure_prevents_manifest(tmp_path, monkeypatch):
         monkeypatch.setattr(os, "fsync", fail_fsync)
         with pytest.raises(OSError, match="checkpoint payload sync failed"):
             store.save_to(str(checkpoint / "iter_0000001"))
-    assert not (checkpoint / "iter_0000001" / store.relative_dir / "manifest.json").exists()
+        manifest = checkpoint / "iter_0000001" / store.relative_dir / "manifest.json"
+        assert not manifest.exists()
+        monkeypatch.setattr(os, "fsync", native_fsync)
+        store.save_to(str(checkpoint / "iter_0000001"))
+    assert manifest.is_file()
 
 
 @pytest.mark.parametrize("remainders", [False, True])

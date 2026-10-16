@@ -439,6 +439,9 @@ class NVMeOptimizerStateStore:
     @torch.no_grad()
     def save_to(self, base_dir: str) -> None:
         dirpath = os.path.join(base_dir, self.relative_dir)
+        manifest_path = os.path.join(dirpath, "manifest.json")
+        if os.path.lexists(manifest_path):
+            raise FileExistsError(f"Refusing to overwrite NVMe optimizer checkpoint at {manifest_path}")
         os.makedirs(dirpath, exist_ok=True)
         manifest = {
             "dtypes": {segment: str(dtype) for segment, dtype in self.dtypes.items()},
@@ -468,7 +471,7 @@ class NVMeOptimizerStateStore:
                 torch.save(self._fp32_adam.state_dict(), f)
                 f.flush()
                 os.fsync(f.fileno())
-        with open(os.path.join(dirpath, "manifest.json"), "w") as f:
+        with open(manifest_path, "w") as f:
             json.dump(manifest, f)
             f.flush()
             os.fsync(f.fileno())
