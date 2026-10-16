@@ -459,11 +459,27 @@ class NVMeOptimizerStateStore:
         }
         for bucket in self.buckets:
             os.fdatasync(bucket.fd)
-            shutil.copyfile(bucket.path, os.path.join(dirpath, os.path.basename(bucket.path)))
+            destination = os.path.join(dirpath, os.path.basename(bucket.path))
+            shutil.copyfile(bucket.path, destination)
+            with open(destination, "rb") as f:
+                os.fsync(f.fileno())
         if self._fp32_adam is not None:
-            torch.save(self._fp32_adam.state_dict(), os.path.join(dirpath, "fp32_resident_optimizer.pt"))
+            with open(os.path.join(dirpath, "fp32_resident_optimizer.pt"), "wb") as f:
+                torch.save(self._fp32_adam.state_dict(), f)
+                f.flush()
+                os.fsync(f.fileno())
         with open(os.path.join(dirpath, "manifest.json"), "w") as f:
             json.dump(manifest, f)
+            f.flush()
+            os.fsync(f.fileno())
+        # A file fsync does not persist newly created directory entries. Persist
+        # each level before Megatron can publish the iteration tracker.
+        for path in (dirpath, os.path.dirname(dirpath), base_dir, os.path.dirname(base_dir)):
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         logger.info(f"NVMe optimizer state saved: {len(self.buckets)} buckets -> {dirpath}")
 
     @torch.no_grad()
