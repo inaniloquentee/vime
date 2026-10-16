@@ -131,16 +131,12 @@ def assert_nvme_grad_norms(checkpoint_dir: str, mode: str, expected_count: int):
 def build_train_args(mode: str = "", optimizer: str = "cpu", checkpoint_dir: str = ""):
     ckpt_args = f"--hf-checkpoint /root/models/{MODEL_NAME}/ " f"--ref-load /root/models/{MODEL_NAME}_torch_dist "
     checkpoint_dir_arg = quote(checkpoint_dir)
-    if mode == "save":
-        ckpt_args += f"--save {checkpoint_dir_arg} "
-        ckpt_args += "--save-interval 2 "
-    elif mode == "async_save":
-        ckpt_args += f"--save {checkpoint_dir_arg} "
-        ckpt_args += "--save-interval 2 "
+    if mode in ("save", "async_save", "load"):
+        ckpt_args += f"--save {checkpoint_dir_arg} --save-interval 2 "
+    if mode == "async_save":
         ckpt_args += "--async-save "
     elif mode == "load":
-        ckpt_args += f"--load {checkpoint_dir_arg} "
-        ckpt_args += "--ckpt-step 1 "
+        ckpt_args += f"--load {checkpoint_dir_arg} --ckpt-step 1 "
         if optimizer == "nvme":
             # Persist the resumed update too: a successful process exit alone does
             # not demonstrate that Adam counters were restored rather than reset.
@@ -148,6 +144,8 @@ def build_train_args(mode: str = "", optimizer: str = "cpu", checkpoint_dir: str
 
     nvme = optimizer == "nvme"
     rollout_args = (
+        "--rollout-data-transport straw "
+        f"--rollout-data-dir {quote(str(Path(checkpoint_dir) / 'rollout_data'))} "
         "--prompt-data /root/datasets/dapo-math-17k/dapo-math-17k.jsonl "
         "--input-key prompt "
         "--label-key label "
@@ -272,6 +270,8 @@ if __name__ == "__main__":
         assert_nvme_grad_norms(checkpoint_dir, "save", expected_count=6)
         assert_nvme_checkpoint(checkpoint_dir, iteration=1, expected_steps=4)
         assert_nvme_checkpoint(checkpoint_dir, iteration=2, expected_steps=6)
+    for filename in ("queue_state_1.json", "builder_state_1.json"):
+        assert (Path(checkpoint_dir) / "rollout" / filename).is_file(), f"Missing straw checkpoint: {filename}"
     execute("load", optimizer=args.load_optimizer, checkpoint_dir=checkpoint_dir)
     if args.load_optimizer == "nvme":
         assert_nvme_grad_norms(checkpoint_dir, "load", expected_count=2)

@@ -86,7 +86,7 @@ def test_roundtrip_commands(monkeypatch, placement):
         assert "--ci-save-grad-norm" in save
     else:
         assert "--variable-global-batch-size" not in save
-        assert "--save " not in load
+        assert "--save '/tmp/test checkpoint' --save-interval 2" in load
         assert "--num-rollout 2" in save
 
 
