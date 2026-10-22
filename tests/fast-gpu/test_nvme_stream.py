@@ -128,6 +128,9 @@ def test_bucket_fetch_step_matches_in_memory_adam(bucket_factory):
     [
         pytest.param("torch", (0,), False, id="torch"),
         pytest.param("megatron", (0,), False, id="megatron"),
+        pytest.param("torch", (1, 4), False, id="torch-groups-1-4"),
+        pytest.param("megatron", (1, 4), False, id="megatron-groups-1-4"),
+        pytest.param("torch", (1, 4), True, id="legacy-torch-groups-1-4"),
         pytest.param("megatron", (1,), True, id="legacy-group-1"),
         pytest.param("megatron", (1, 4), True, id="legacy-groups-1-4"),
     ],
@@ -140,6 +143,12 @@ def test_nvme_checkpoint_round_trip(bucket_factory, tmp_path, backend, groups, l
     initial = torch.linspace(-2.0, 2.0, 2048)
     params, adam, bucket = bucket_factory("live", initial, groups, Adam)
     restored_params, restored_adam, restored_bucket = bucket_factory("restored", initial, groups, Adam)
+    if not legacy:
+        for index, (saved_group, new_group) in enumerate(
+            zip(adam.param_groups, restored_adam.param_groups, strict=True)
+        ):
+            saved_group.update(lr=0.01 * (index + 1), betas=(0.7 + index * 0.1, 0.91), eps=1e-4, weight_decay=0.2)
+            new_group.update(lr=0.2, betas=(0.5, 0.8), eps=0.1, weight_decay=0.5)
     for param in params:
         param.grad = torch.full_like(param, 0.25)
     adam.step()
@@ -165,10 +174,18 @@ def test_nvme_checkpoint_round_trip(bucket_factory, tmp_path, backend, groups, l
     if legacy:
         manifest_path = checkpoint / store.relative_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
+        manifest.pop("param_groups_file", None)
         for meta in manifest["buckets"]:
             del meta["state_steps"]
         manifest_path.write_text(json.dumps(manifest))
     assert _store([restored_bucket]).load_from(str(checkpoint))
+    for saved_group, loaded_group in zip(adam.param_groups, restored_adam.param_groups, strict=True):
+        assert {k: v for k, v in loaded_group.items() if k != "params"} == {
+            k: v for k, v in saved_group.items() if k != "params"
+        }
+    assert all(
+        group["params"][0] is param for group, param in zip(restored_adam.param_groups, restored_params, strict=True)
+    )
     bucket.fetch()
     restored_bucket.fetch()
     _assert_optimizer_equal(restored_adam, restored_params, adam, params)
@@ -178,6 +195,63 @@ def test_nvme_checkpoint_round_trip(bucket_factory, tmp_path, backend, groups, l
     adam.step()
     restored_adam.step()
     _assert_optimizer_equal(restored_adam, restored_params, adam, params)
+
+
+@pytest.mark.parametrize("corruption", ["missing", "bucket-count", "group-indices", "group-count"])
+def test_checkpoint_rejects_invalid_param_groups(bucket_factory, tmp_path, corruption):
+    initial = torch.ones(8)
+    _, _, bucket = bucket_factory("live", initial, groups=(1, 4))
+    _, _, restored_bucket = bucket_factory("restored", initial, groups=(1, 4))
+    bucket.flush(segments=("main",))
+    store = _store([bucket])
+    checkpoint = tmp_path / "checkpoint"
+    store.save_to(str(checkpoint))
+    directory = checkpoint / store.relative_dir
+    manifest = json.loads((directory / "manifest.json").read_text())
+    groups_path = directory / manifest["param_groups_file"]
+    if corruption == "missing":
+        groups_path.unlink()
+        error = FileNotFoundError
+    else:
+        groups = torch.load(groups_path, weights_only=True)
+        if corruption == "bucket-count":
+            groups.clear()
+        elif corruption == "group-indices":
+            groups[0]["group_indices"].reverse()
+        else:
+            groups[0]["param_groups"].pop()
+        torch.save(groups, groups_path)
+        error = AssertionError
+    with open(restored_bucket.path, "rb") as f:
+        before = f.read()
+    with pytest.raises(error):
+        _store([restored_bucket]).load_from(str(checkpoint))
+    with open(restored_bucket.path, "rb") as f:
+        assert f.read() == before
+
+
+def test_checkpoint_restores_tensor_lr_and_scheduler_still_controls_lr_wd(bucket_factory, tmp_path):
+    initial = torch.ones(8)
+    params, adam, bucket = bucket_factory("live", initial)
+    restored_params, restored_adam, restored_bucket = bucket_factory("restored", initial)
+    adam.param_groups[0].update(lr=torch.tensor(0.01), betas=(0.8, 0.9), eps=1e-4)
+    params[0].grad = torch.full_like(params[0], 0.25)
+    adam.step()
+    bucket.flush()
+    _store([bucket]).save_to(str(tmp_path / "checkpoint"))
+    restored = _store([restored_bucket])
+    assert restored.load_from(str(tmp_path / "checkpoint"))
+    group = restored_adam.param_groups[0]
+    torch.testing.assert_close(group["lr"], adam.param_groups[0]["lr"], atol=0, rtol=0)
+    assert group["params"][0] is restored_params[0]
+    restored.dist_opt = types.SimpleNamespace(
+        optimizer=types.SimpleNamespace(param_groups=[{"lr": 0.005, "weight_decay": 0.3}])
+    )
+    restored._sync_lr_wd(restored_adam, restored_bucket.group_indices)
+    assert group["lr"] == 0.005
+    assert group["weight_decay"] == 0.3
+    assert group["betas"] == (0.8, 0.9)
+    assert group["eps"] == 1e-4
 
 
 def test_nvme_checkpoint_before_first_step_can_resume(bucket_factory, tmp_path):

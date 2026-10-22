@@ -445,6 +445,7 @@ class NVMeOptimizerStateStore:
         os.makedirs(dirpath, exist_ok=True)
         manifest = {
             "dtypes": {segment: str(dtype) for segment, dtype in self.dtypes.items()},
+            "param_groups_file": "bucket_param_groups.pt",
             "buckets": [
                 {
                     "numel": bucket.numel,
@@ -466,6 +467,22 @@ class NVMeOptimizerStateStore:
             shutil.copyfile(bucket.path, destination)
             with open(destination, "rb") as f:
                 os.fsync(f.fileno())
+        # Persist metadata only, never state_dict() tensors whose storage has been
+        # evicted. torch.save preserves tuples and tensor-valued settings (e.g. lr),
+        # unlike JSON. Parameters must remain the new run's stable main handles.
+        param_groups = [
+            {
+                "group_indices": bucket.group_indices,
+                "param_groups": [
+                    {k: v for k, v in group.items() if k != "params"} for group in bucket.adam.param_groups
+                ],
+            }
+            for bucket in self.buckets
+        ]
+        with open(os.path.join(dirpath, manifest["param_groups_file"]), "wb") as f:
+            torch.save(param_groups, f)
+            f.flush()
+            os.fsync(f.fileno())
         if self._fp32_adam is not None:
             with open(os.path.join(dirpath, "fp32_resident_optimizer.pt"), "wb") as f:
                 torch.save(self._fp32_adam.state_dict(), f)
@@ -516,10 +533,33 @@ class NVMeOptimizerStateStore:
             f"current topology builds {len(self.buckets)} (same-topology resume only)"
         )
 
-        for bucket, meta in zip(self.buckets, manifest["buckets"], strict=True):
+        param_groups = None
+        if "param_groups_file" in manifest:
+            param_groups = torch.load(
+                os.path.join(dirpath, manifest["param_groups_file"]), map_location="cpu", weights_only=True
+            )
+            # Validate the complete metadata before replacing any live bucket.
+            assert len(param_groups) == len(self.buckets), "NVMe state param-group bucket count mismatch"
+            for bucket, saved_groups in zip(self.buckets, param_groups, strict=True):
+                assert saved_groups["group_indices"] == bucket.group_indices, "NVMe state param-group layout mismatch"
+                assert len(saved_groups["param_groups"]) == len(
+                    bucket.adam.param_groups
+                ), "NVMe state param-group count mismatch"
+                assert all("params" not in group for group in saved_groups["param_groups"])
+        else:
+            logger.warning("Legacy NVMe checkpoint has no Adam param-group settings; using this run's settings")
+
+        for index, (bucket, meta) in enumerate(zip(self.buckets, manifest["buckets"], strict=True)):
             assert meta["numel"] == bucket.numel
             assert meta["entry_numels"] == [e.main_param.numel() for e in bucket.entries]
             shutil.copyfile(os.path.join(dirpath, meta["file"]), bucket.path)
+            if param_groups is not None:
+                for group, saved_group in zip(
+                    bucket.adam.param_groups, param_groups[index]["param_groups"], strict=True
+                ):
+                    group.update(saved_group)
+                # LR/WD remain scheduler-controlled through _sync_lr_wd at step
+                # time; betas, eps and the remaining Adam settings stay restored.
             for group, step in zip(bucket.adam.param_groups, meta["steps"], strict=True):
                 if step:
                     group["step"] = step

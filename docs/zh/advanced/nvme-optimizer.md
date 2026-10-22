@@ -39,6 +39,12 @@ FP32 moment storage 已有完整模型验证，BF16 moment storage 已有组件�
 的 bucket 文件和 manifest；流式状态会先于 Megatron 发布 checkpoint tracker 保存。
 改变 TP/PP/DP/CP 布局时不会自动 reshard。
 
+Bucket checkpoint 也会保存 Adam 的参数组配置，包括 `betas` 和 `eps`，
+而不会序列化已释放的参数存储。即使新进程的 optimizer 参数不同，加载时也会恢复保存的配置；
+每次 optimizer step 的学习率和 weight decay 仍由 Megatron scheduler 控制。
+不含参数组元数据的旧版 NVMe manifest 仍可读取，但会发出警告并使用新进程的配置；
+恢复这类 checkpoint 时应沿用原来的 optimizer 参数。
+
 不含流式 optimizer state 的 checkpoint 不能静默恢复该状态。`--no-load-optim` 表示明确
 接受重新初始化 optimizer，而不是 checkpoint roundtrip。与 Megatron 一致，`--finetune`
 和 release checkpoint 也跳过 optimizer 状态恢复；普通的 iteration-zero checkpoint

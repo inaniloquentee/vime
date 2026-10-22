@@ -46,6 +46,14 @@ The checkpoint includes per-rank bucket files and manifests;
 the streamed state is saved before Megatron publishes its checkpoint tracker.
 The format is not resharded when TP/PP/DP/CP layout changes.
 
+Bucket checkpoints also save Adam's parameter-group settings, including `betas`
+and `eps`, without serializing the evicted parameter storage. These settings are
+restored even if the new run starts with different optimizer arguments. LR and
+weight decay remain controlled by Megatron's scheduler at each optimizer step.
+Older NVMe manifests without parameter-group metadata remain readable, but emit
+a warning and use the new run's settings; use the original optimizer arguments
+when resuming those checkpoints.
+
 A checkpoint without streamed optimizer state cannot resume that state silently.
 `--no-load-optim` explicitly accepts starting a fresh optimizer; it is not a
 checkpoint roundtrip. As with Megatron, `--finetune` and release checkpoints also
