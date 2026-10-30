@@ -98,8 +98,16 @@ __all__ = ["save_checkpoint"]
 def _nvme_stores(optimizer):
     if optimizer is None:
         return []
+    chained = getattr(optimizer, "chained_optimizers", None)
+    if chained is None:
+        chained = (optimizer,)
+    else:
+        try:
+            iter(chained)
+        except TypeError:
+            chained = (optimizer,)
     stores = []
-    for item in getattr(optimizer, "chained_optimizers", [optimizer]):
+    for item in chained:
         store = getattr(item, "_nvme_state_store", None)
         if store is not None:
             stores.append(store)
