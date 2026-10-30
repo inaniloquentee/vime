@@ -1,8 +1,4 @@
-# Usage:  buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
-#
-# This pipeline is for running NPU tests on PRs.
-# Scheduled builds always build a fresh image. PR builds reuse DEFAULT_CI_IMAGE
-# unless image-build is selected; patch-only changes are reconciled at runtime.
+# Usage: buildkite-agent pipeline upload .buildkite/pipeline-npu.yaml
 
 steps:
   - group: ":pipeline: Run NPU test"
@@ -28,46 +24,12 @@ steps:
               pre-commit run --all-files --show-diff-on-failure --color=always
             '
 
-      - block: ":rocket: Run NPU test suites?"
-        key: npu-gate
-        depends_on: pre-commit-npu
-        if: build.source != "schedule"
-        blocked_state: passed
-        prompt: "Select the npu suites to run."
-        fields:
-          - select: "NPU suites"
-            key: npu-suites
-            multiple: true
-            required: true
-            options:
-              - label: "run-npu-ci-image-build (test new image, auto include smk)"
-                value: image-build
-              - label: "run-npu-ci-smk"
-                value: smk
-              - label: "run-npu-ci-nightly"
-                value: nightly
-
       - label: ":pipeline: upload NPU suites"
         key: upload-npu-suites
-        depends_on:
-          - npu-gate
+        depends_on: pre-commit-npu
         agents:
           queue: "ascend-a3"
           resource_class: "npu-2"
         timeout_in_minutes: 180
         command:  |
-          NPU_SUITES=$$(buildkite-agent meta-data get "npu-suites" --default "")
-          if [[ "$$BUILDKITE_SOURCE" == "schedule" ]]; then
-            echo "Scheduled build — building the image."
-            echo "BUILDKITE_SOURCE: $$BUILDKITE_SOURCE"
-            SKIP_IMAGE_BUILD=false
-          elif [[ "$$NPU_SUITES" == *"image-build"* ]]; then
-            echo "image-build selected — building the image."
-            echo "NPU_SUITES: $$NPU_SUITES"
-            SKIP_IMAGE_BUILD=false
-          else
-            echo "Skipping image build because image-build is not present in the npu-suites."
-            SKIP_IMAGE_BUILD=true
-          fi
-          sed -e "s/__SKIP_IMAGE_BUILD__/$${SKIP_IMAGE_BUILD}/g" .buildkite/pipeline-npu-image.yaml | buildkite-agent pipeline upload
-          python .buildkite/npu_suites.py | buildkite-agent pipeline upload
+          NPU_SUITES="$${NPU_SUITES:-smk}" python .buildkite/npu_suites.py | buildkite-agent pipeline upload

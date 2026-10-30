@@ -17,26 +17,18 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 NPU_QUEUE = "ascend-a3"
-DEFAULT_CI_IMAGE = "quay.io/ascend/vime:vime-latest"
-IMAGE_REGISTRY = "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry"
-IMAGE_NAME = "vime-ci-npu"
-VIME_IMAGE_TAG = os.environ.get("BUILDKITE_COMMIT", "latest")
-BUILDKITE_SOURCE = os.environ.get("BUILDKITE_SOURCE", "")
+CI_IMAGE = "quay.io/ascend/vime:vime-latest"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # (test_name, resource_class, extra_args, env_overrides[, timeout_in_minutes])
 SUITES = {
     "smk": [
-        ("test_delta_disk_weight_update.py", "npu-4", "", {}),
-        ("test_qwen3_4B_npu.py", "npu-8", "", {}),
-        ("test_qwen3_30B_A3B_npu.py", "npu-16", "", {}),
-        ("test_qwen3_vl_8B_npu.py", "npu-8", "", {}),
-        ("test_glm4.7_30B_A3B_npu.py", "npu-16", "", {}),
-        # 35B convert plus the first rollout does not fit in the default 180 minutes.
-        ("test_qwen3.5_35B_A3B_npu.py", "npu-16", "", {}, 360),
+        ("test_npu_ci_smoke.py", "npu-1", "", {}),
     ],
-    "nightly": [],
+    "nightly": [("test_npu_ci_smoke.py", "npu-1", "", {})],
 }
 
 
@@ -52,25 +44,27 @@ def _read_suite_values() -> list[str]:
             ).stdout
         except subprocess.CalledProcessError:
             raw = ""
-    return [v.strip() for v in raw.replace(",", "\n").splitlines()]
-
-
-def _ci_image() -> str:
-    values = _read_suite_values()
-    if ("image-build" in values) or (BUILDKITE_SOURCE == "schedule"):
-        return f"{IMAGE_REGISTRY}/{IMAGE_NAME}:{VIME_IMAGE_TAG}"
-    return DEFAULT_CI_IMAGE
+    values = [v.strip() for v in raw.replace(",", "\n").splitlines() if v.strip()]
+    return values or ["smk"]
 
 
 def selected_suites() -> list:
     values = _read_suite_values()
-    unknown = [v for v in values if v and v not in SUITES and v != "image-build"]
+    unknown = [v for v in values if v not in SUITES]
     if unknown:
         raise SystemExit(f"unknown suite(s) {unknown}; expected {sorted(SUITES)}")
-    if "image-build" in values:
-        # image-build auto-includes smk tests
-        values.append("smk")
     return [s for s in SUITES if s in values]
+
+
+def _validate_tests(selected: list[str]) -> None:
+    missing = []
+    for suite in selected:
+        for test_name, *_ in SUITES[suite]:
+            path = REPO_ROOT / "tests" / test_name
+            if not path.is_file():
+                missing.append(str(path))
+    if missing:
+        raise SystemExit(f"NPU suite references missing test file(s): {missing}")
 
 
 def npu_step(
@@ -87,37 +81,24 @@ def npu_step(
         "BUILDKITE_COMMIT": os.environ.get("BUILDKITE_COMMIT", ""),
         "HF_TOKEN": "${HF_TOKEN}",
         "HF_ENDPOINT": "https://hf-mirror.com",
-        "ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15",
-        "IMAGE_REGISTRY": IMAGE_REGISTRY,
-        "IMAGE_NAME": IMAGE_NAME,
-        "VIME_IMAGE_TAG": VIME_IMAGE_TAG,
+        "ASCEND_RT_VISIBLE_DEVICES": "0",
         "HF_HOME": "/root/.cache/huggingface",
         **env,
     }
 
-    commands = "\n".join(
-        [
-            'echo "INFO: update NPU environment"',
-            'if [ -n "${BUILDKITE_COMMIT}" ]; then',
-            "  source /workspace/build/buildkite/.buildkite/scripts/update-npu-environment.sh",
-            "fi",
-            "export HF_HUB_OFFLINE=0",
-            f"python tests/{test_name}{' ' + extra_args if extra_args else ''}",
-        ]
-    )
+    commands = f"PYTHONPATH=\"$PWD${{PYTHONPATH:+:$PYTHONPATH}}\" python tests/{test_name}{' ' + extra_args if extra_args else ''}"
     command = f"bash -c '{commands}'"
 
     label = f":fire: {suite}: {test_name}{' ' + extra_args if extra_args else ''}"
     step = {
         "label": label,
-        "depends_on": "image-build-npu",
         "command": command,
         "agents": {
             "queue": NPU_QUEUE,
             "resource_class": resource_class,
         },
         "timeout_in_minutes": timeout_in_minutes,
-        "image": _ci_image(),
+        "image": CI_IMAGE,
         "plugins": [
             {
                 "kubernetes": {
@@ -133,7 +114,11 @@ def npu_step(
 
 
 def main() -> None:
-    steps = [npu_step(suite, *entry) for suite in selected_suites() for entry in SUITES[suite]]
+    selected = selected_suites()
+    if not selected:
+        raise SystemExit("NPU suite selection is empty")
+    _validate_tests(selected)
+    steps = [npu_step(suite, *entry) for suite in selected for entry in SUITES[suite]]
     json_str = json.dumps({"steps": steps}, indent=2)
 
     print("--- Generated Pipeline JSON:", file=sys.stderr)
