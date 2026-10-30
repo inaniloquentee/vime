@@ -424,7 +424,7 @@ def test_checkpoint_wrapper_restores_only_stores_with_state(tmp_path, monkeypatc
         ("no-load-optim", 3, False),
         ("finetune", 0, False),
         ("release", 0, False),
-        ("release-step-override", 0, False),
+        ("release-step-override", 7, False),
         ("resume-zero", 0, True),
         ("resume", 3, True),
     ],

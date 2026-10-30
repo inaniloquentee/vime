@@ -154,6 +154,7 @@ def _check_variable_batch_initialization():
         deterministic_mode=False,
         tp_comm_overlap=False,
         custom_megatron_init_path=None,
+        tokenizer_type=None,
     )
     with (
         patch.object(initialize, "set_args"),
@@ -186,6 +187,7 @@ def _check_train_logging_tracks_actual_progress():
         use_rollout_routing_replay=False,
         ci_save_grad_norm=None,
         ci_load_grad_norm=None,
+        rollout_top_p=1.0,
     )
     optimizer = torch.optim.AdamW([torch.nn.Parameter(torch.ones(1))], lr=args.lr)
     optimizer.scale_loss = lambda loss: loss

@@ -124,7 +124,7 @@ def _checkpoint_base(path, iteration):
         from megatron.training.checkpointing import get_checkpoint_name
 
         return get_checkpoint_name(path, iteration, release=False, return_base_dir=True)
-    except (ImportError, TypeError):
+    except (ImportError, AttributeError, TypeError, ValueError):
         return os.path.join(path, f"iter_{iteration:07d}")
 
 
