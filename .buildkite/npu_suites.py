@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 NPU_QUEUE = "ascend-a3"
-CI_IMAGE = "quay.io/ascend/vime:vime-latest"
+CI_IMAGE = "swr.cn-southwest-2.myhuaweicloud.com/modelfoundry/" "vime-ci-npu:f6e700ec7f19bcc567e70a910ad9868ff7360dbd"
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # (test_name, resource_class, extra_args, env_overrides[, timeout_in_minutes])
