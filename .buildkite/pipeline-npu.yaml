@@ -28,8 +28,7 @@ steps:
         key: upload-npu-suites
         depends_on: pre-commit-npu
         agents:
-          queue: "ascend-a3"
-          resource_class: "npu-2"
+          queue: small_cpu_queue_premerge
         timeout_in_minutes: 180
         command:  |
           NPU_SUITES="$${NPU_SUITES:-smk}" python .buildkite/npu_suites.py | buildkite-agent pipeline upload
