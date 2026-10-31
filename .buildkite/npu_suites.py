@@ -86,7 +86,7 @@ def npu_step(
         **env,
     }
 
-    commands = f"PYTHONPATH=\"$PWD${{PYTHONPATH:+:$PYTHONPATH}}\" python tests/{test_name}{' ' + extra_args if extra_args else ''}"
+    commands = f"PYTHONPATH=\"$PWD:$PYTHONPATH\" python tests/{test_name}{' ' + extra_args if extra_args else ''}"
     command = f"bash -c '{commands}'"
 
     label = f":fire: {suite}: {test_name}{' ' + extra_args if extra_args else ''}"
