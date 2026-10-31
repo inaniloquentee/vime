@@ -26,9 +26,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # (test_name, resource_class, extra_args, env_overrides[, timeout_in_minutes])
 SUITES = {
     "smk": [
-        ("test_npu_ci_smoke.py", "npu-2", "", {}),
+        ("test_npu_ci_smoke.py", "npu-4", "", {}),
     ],
-    "nightly": [("test_npu_ci_smoke.py", "npu-2", "", {})],
+    "nightly": [("test_npu_ci_smoke.py", "npu-4", "", {})],
 }
 
 
