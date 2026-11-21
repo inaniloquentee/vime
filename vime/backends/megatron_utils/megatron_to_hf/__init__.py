@@ -1,7 +1,4 @@
-from vime.backends.megatron_utils.deepseek_v4_weights import (
-    convert_deepseek_v4_to_hf,
-    quantize_deepseek_v4_weights,
-)
+from vime.backends.megatron_utils.deepseek_v4_weights import convert_deepseek_v4_to_hf, quantize_deepseek_v4_weights
 
 from .deepseekv3 import convert_deepseekv3_to_hf
 from .glm4 import convert_glm4_to_hf
@@ -40,7 +37,7 @@ def _convert_to_hf_core(args, model_name, name, param):
     model_name = model_name.lower().replace("_", "").replace("-", "")
     if "deepseekv4" in model_name:
         converted_named_tensors = convert_deepseek_v4_to_hf(args, name, param)
-    elif     if "minimaxm2" in model_name:
+    elif "minimaxm2" in model_name:
         converted_named_tensors = convert_minimax_m2_to_hf(args, name, param)
     elif any(family in model_name for family in ("glm4moelite", "deepseekv3", "deepseekv32", "glmmoedsa", "kimi")):
         converted_named_tensors = convert_deepseekv3_to_hf(args, name, param)

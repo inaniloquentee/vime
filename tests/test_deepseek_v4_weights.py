@@ -110,17 +110,23 @@ def test_native_v4_rejects_packed_non_fp8_weights(tmp_path):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FP8 refit needs CUDA")
 def test_online_fp8_scale_matches_v4_checkpoint_format():
     pytest.importorskip("vllm")
+    from vllm.platforms import current_platform
+
     weight = torch.randn((128, 128), device="cuda", dtype=torch.bfloat16)
     config = {"quant_method": "fp8", "weight_block_size": [128, 128]}
     exported = dict(quantize_deepseek_v4_weights([("layers.0.attn.wq_a.weight", weight)], config))
     scale = exported["layers.0.attn.wq_a.scale"]
-    assert exported["layers.0.attn.wq_a.weight"].dtype == torch.float8_e4m3fn
+    quantized = exported["layers.0.attn.wq_a.weight"]
+    assert quantized.dtype == current_platform.fp8_dtype()
+    torch.testing.assert_close(quantized.float() * scale.float(), weight.float(), atol=0.01, rtol=0.065)
     assert torch.all(torch.log2(scale.float()) == torch.log2(scale.float()).round())
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="FP8 refit needs CUDA")
 def test_online_fp8_export_covers_flash_checkpoint_scales():
     pytest.importorskip("vllm")
+    from vllm.platforms import current_platform
+
     checkpoint = os.environ.get("DSV4_CHECKPOINT")
     if checkpoint is None:
         pytest.skip("Set DSV4_CHECKPOINT to check the local Flash checkpoint")
@@ -137,7 +143,7 @@ def test_online_fp8_export_covers_flash_checkpoint_scales():
         exported = dict(quantize_deepseek_v4_weights([(weight_name, weight)], config))
         assert scale_name in exported, f"Missing online FP8 scale for {weight_name}"
         assert exported[scale_name].shape == (1, 1)
-        assert exported[weight_name].dtype == torch.float8_e4m3fn
+        assert exported[weight_name].dtype == current_platform.fp8_dtype()
 
 
 def test_unknown_parameter_is_rejected():
@@ -203,9 +209,9 @@ def test_local_four_layer_fixture_coverage():
     path = Path(checkpoint)
     config = json.loads((path / "config.json").read_text())
     index = json.loads((path / "model.safetensors.index.json").read_text())["weight_map"]
-    assert config["num_hidden_layers"] == 43
+    assert config["num_hidden_layers"] >= 4
     assert config["compress_ratios"][:4] == [0, 0, 4, 128]
-    assert len(config["compress_ratios"]) == 44  # Last ratio belongs to disabled MTP.
+    assert len(config["compress_ratios"]) >= config["num_hidden_layers"] + config["num_nextn_predict_layers"]
     for layer in (0, 1):
         assert f"layers.{layer}.attn.compressor.ape" not in index
     for layer in (2, 3):

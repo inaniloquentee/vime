@@ -430,5 +430,85 @@ def test_force_fp8_ue8m0_scale_argument(monkeypatch):
     assert configured.force_fp8_ue8m0_scale is True
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "hip,variant,backend,expected",
+    [
+        ("7.2", "dsv4_hybrid", None, "none"),
+        ("7.2", "dsv4_hybrid", "cudnn", "cudnn"),
+        (None, "dsv4_hybrid", None, None),
+        ("7.2", "dsa", None, None),
+    ],
+)
+def test_v4_rocm_backend_default(monkeypatch, hip, variant, backend, expected):
+    module = load_arguments_module(monkeypatch)
+    monkeypatch.setattr(module.torch.version, "hip", hip)
+    args = types.SimpleNamespace(
+        experimental_attention_variant=variant,
+        dsa_kernel_backend=backend,
+        fp16=False,
+        seq_length=256,
+        max_position_embeddings=None,
+        vocab_size=None,
+        tokenizer_model="checkpoint",
+        tokenizer_type="HuggingFaceTokenizer",
+    )
+    assert module.set_default_megatron_args(args).dsa_kernel_backend == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "megatron.core.dist_checkpointing.strategies.filesystem_async",
+        "nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async",
+    ],
+)
+def test_rocm_checkpoint_writer_discovery(monkeypatch, module_name):
+    from vime.utils import rocm_checkpoint_writer as module
+
+    class Writer:
+        @staticmethod
+        def preload_tensors(tensors, non_blocking=True):
+            return tensors, non_blocking
+
+    writer_module = types.SimpleNamespace(FileSystemWriterAsync=Writer)
+
+    def import_writer(name):
+        if name == module_name:
+            return writer_module
+        raise ModuleNotFoundError(name=name)
+
+    monkeypatch.setattr(module.torch.version, "hip", "7.2")
+    monkeypatch.setattr(module, "import_module", import_writer)
+    module.patch_rocm_checkpoint_writer()
+    patched = writer_module.FileSystemWriterAsync
+    assert patched.preload_tensors([1], True) == ([1], False)
+    assert patched.preload_tensors([1], non_blocking=True) == ([1], False)
+    assert patched.preload_tensors([1]) == ([1], False)
+    module.patch_rocm_checkpoint_writer()
+    assert writer_module.FileSystemWriterAsync is patched
+
+
+@pytest.mark.unit
+def test_rocm_checkpoint_writer_optional_dependency(monkeypatch):
+    from vime.utils import rocm_checkpoint_writer as module
+
+    def missing(name):
+        raise ModuleNotFoundError(name=name)
+
+    monkeypatch.setattr(module.torch.version, "hip", "7.2")
+    monkeypatch.setattr(module, "import_module", missing)
+    module.patch_rocm_checkpoint_writer()
+
+    def broken(name):
+        raise ModuleNotFoundError(name="missing_writer_dependency")
+
+    monkeypatch.setattr(module, "import_module", broken)
+    with pytest.raises(ModuleNotFoundError) as exc:
+        module.patch_rocm_checkpoint_writer()
+    assert exc.value.name == "missing_writer_dependency"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

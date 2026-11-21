@@ -2,7 +2,6 @@ import gc
 import os
 import shutil
 
-import torch
 import torch.distributed as dist
 from megatron.core.enums import ModelType
 from megatron.training.arguments import parse_args, validate_args
@@ -79,13 +78,9 @@ def get_args():
 
 
 def main():
-    if torch.version.hip:
-        import megatron.core.dist_checkpointing.strategies.filesystem_async as filesystem_async_module
+    from vime.utils.rocm_checkpoint_writer import patch_rocm_checkpoint_writer
 
-        from vime.utils.rocm_checkpoint_writer import ROCmFileSystemWriterAsync
-
-        filesystem_async_module.FileSystemWriterAsync = ROCmFileSystemWriterAsync
-        print("[ROCm] Applied FileSystemWriterAsync patch for HIP compatibility")
+    patch_rocm_checkpoint_writer()
 
     configure_logger()
 

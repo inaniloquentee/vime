@@ -1,27 +1,38 @@
+from importlib import import_module
+
 import torch
-from megatron.core.dist_checkpointing.strategies.filesystem_async import FileSystemWriterAsync
 
 
-class ROCmFileSystemWriterAsync(FileSystemWriterAsync):
-    """
-    FileSystemWriterAsync wrapper for ROCm compatibility.
+def patch_rocm_checkpoint_writer():
+    """Avoid pinned-memory preloads before async checkpoint workers fork on ROCm."""
+    if not torch.version.hip:
+        return
 
-    On ROCm/HIP, using non_blocking=True causes tensors to be stored in pinned memory,
-    which triggers segmentation faults when forking subprocesses afterward.
-    """
+    # Megatron moved its optional async writer to nvidia-resiliency-ext.
+    for module_name in (
+        "megatron.core.dist_checkpointing.strategies.filesystem_async",
+        "nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async",
+    ):
+        try:
+            module = import_module(module_name)
+        except ModuleNotFoundError as exc:
+            if exc.name == module_name or module_name.startswith(f"{exc.name}."):
+                continue
+            raise
+        writer = module.FileSystemWriterAsync
+        if getattr(writer, "_vime_rocm_patched", False):
+            return
 
-    @staticmethod
-    def preload_tensors(*args, **kwargs):
-        # Change argument non_blocking to False on HIP platform
-        # The tensors will be stored in pinned memory if non_blocking=True
-        # Currently on the ROCm platform, forking a subprocess afterward
-        # with pinned_memory=True will trigger segmentation fault
-        if torch.version.hip:
-            print("HIP/ROCm detected: setting non_blocking=False in preload_tensors")
-            if "non_blocking" in kwargs:
-                kwargs["non_blocking"] = False
-            elif len(args) > 1 and isinstance(args[-1], bool):
-                # non_blocking is typically the last argument
+        def preload_tensors(*args, _preload_tensors=writer.preload_tensors, **kwargs):
+            if len(args) > 1 and isinstance(args[-1], bool):
                 args = args[:-1] + (False,)
+            else:
+                kwargs["non_blocking"] = False
+            return _preload_tensors(*args, **kwargs)
 
-        return FileSystemWriterAsync.preload_tensors(*args, **kwargs)
+        module.FileSystemWriterAsync = type(
+            "ROCmFileSystemWriterAsync",
+            (writer,),
+            {"_vime_rocm_patched": True, "preload_tensors": staticmethod(preload_tensors)},
+        )
+        return

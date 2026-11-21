@@ -11,8 +11,8 @@ The reference checkpoint is `/home/ljj/models/DeepSeek-V4-Flash-Base`. The
 checkpoint uses FP8 E4M3 weights, including routed experts, with UE8M0 block
 scales. Packed FP4 expert checkpoints are not supported by this converter.
 Validation dependency pins are Megatron `ae76c60e6`, vLLM `83c078d95`, and
-fast-hadamard-transform `f134af63d`. The latter is installed by the Dockerfile;
-without it, Megatron's compressed-layer forward fails.
+fast-hadamard-transform `f134af63d` for CUDA. On ROCm, the V4 spec supplies
+a differentiable PyTorch Hadamard transform when the extension is unavailable.
 
 Validated on NVIDIA H20-3e:
 
@@ -97,3 +97,37 @@ full HF-to-Megatron and reverse model parity, FP8 online refit
 versus fresh load with cache/version checks, ten-step CP=1 GRPO and resume,
 and the 100-step release recipe. Megatron's native V4 attention currently
 requires TP=1, so full training topology must use PP/EP instead of TP.
+
+## ROCm reduced-layer smoke
+
+Validated on MI300X (`gfx942`) with Megatron `ae76c60e6`, PyTorch
+`2.11.0+gitd0c8b1f` / HIP `7.2.53211`, Transformer Engine
+`2.18.0.dev0+8c116a51b`, and vLLM `0.26.0+rocm723`.
+The local host image is `rl-kernel-ljj:rocm-dev`.
+The checkpoint is the first four full-width layers of Flash-Base revision
+`8855555deef230a27a21a8d6f294b7b7497759b6`, with ratios `[0, 0, 4, 128]`
+and MTP disabled; expert count and model dimensions are unchanged.
+
+Vime defaults native V4 to `dsa_kernel_backend=none` on ROCm before Megatron
+validates the config. This uses Megatron's reference CSA attention and mHC;
+the spec installs the PyTorch Hadamard fallback only when needed. This path
+is intended for correctness and reduced-layer validation. Online FP8 exports
+use vLLM's platform dtype, including E4M3 FNUZ on MI300X.
+
+```bash
+export PYTHONPATH=/work/vime:/work/Megatron-LM
+export DSV4_CHECKPOINT=/cache/DeepSeek-V4-Flash-Base-4l
+# Run each command on a free GPU via HIP_VISIBLE_DEVICES.
+python tools/dsv4_checkpoint_layer_smoke.py "$DSV4_CHECKPOINT" --layer-index 2
+python tools/dsv4_checkpoint_layer_smoke.py "$DSV4_CHECKPOINT" --layer-index 3
+python tools/dsv4_checkpoint_layer_smoke.py "$DSV4_CHECKPOINT" --num-layers 4
+python tools/dsv4_rollout_smoke.py "$DSV4_CHECKPOINT" --tensor-parallel-size 1 --return-routed-experts
+```
+
+The four-layer smoke loads 2,164 checkpoint tensors, including shared experts,
+hash tables, and mHC parameters, and runs packed THD forward/backward at
+sequence length 256 on one MI300X. All 2,160 gradient tensors are finite.
+The isolated C4/hash and C128/learned layers also pass forward/backward.
+vLLM generates four tokens with logprobs and returns `(8, 4, 6)` routes;
+all three hash layers match the checkpoint tables. The RL gates above remain
+open; these are model and rollout checks, not an end-to-end GRPO run.

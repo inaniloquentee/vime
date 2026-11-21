@@ -40,8 +40,10 @@ class StatelessAdam(torch.optim.Optimizer):
             raise ValueError(f"Invalid beta2 value: {betas[1]}")
         if amsgrad:
             raise NotImplementedError("StatelessAdam does not support amsgrad.")
-        if master_weights:
-            raise NotImplementedError("StatelessAdam relies on Megatron/HybridDeviceOptimizer for master weights.")
+        # Precision-aware Megatron passes ``master_weights=True`` to Adam.
+        # Stateless updates operate directly on the low-precision parameter shard,
+        # so no separate master tensor is needed.
+        self.master_weights = False
 
         defaults = dict(
             lr=lr,
@@ -58,6 +60,9 @@ class StatelessAdam(torch.optim.Optimizer):
         super().__init__(params, defaults)
         for group in self.param_groups:
             group.setdefault("step", 0)
+
+    def initialize_state(self, _param, _config=None) -> None:
+        """Satisfy Megatron's precision-aware optimizer initialization hook."""
 
     def load_state_dict(self, state_dict) -> None:
         state_dict = dict(state_dict)

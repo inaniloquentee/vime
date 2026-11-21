@@ -1,6 +1,8 @@
 """Load a local DeepSeek-V4-Flash checkpoint and run a short vLLM rollout."""
 
 import argparse
+import json
+from pathlib import Path
 
 import numpy as np
 from vllm import LLM, SamplingParams
@@ -14,6 +16,7 @@ def main():
     parser.add_argument("--tensor-parallel-size", type=int, default=4)
     parser.add_argument("--return-routed-experts", action="store_true")
     args = parser.parse_args()
+    config = json.loads((Path(args.checkpoint) / "config.json").read_text())
 
     llm = LLM(
         model=args.checkpoint,
@@ -38,11 +41,15 @@ def main():
     if args.return_routed_experts:
         routes = result.outputs[0].routed_experts
         token_ids = list(result.prompt_token_ids) + list(result.outputs[0].token_ids[:-1])
-        assert routes is not None and routes.shape == (len(token_ids), 43, 6), (
+        assert routes is not None and routes.shape == (
+            len(token_ids),
+            config["num_hidden_layers"],
+            config["num_experts_per_tok"],
+        ), (
             None if routes is None else routes.shape
         )
         reader = SafetensorReader(args.checkpoint)
-        for layer_id in range(3):
+        for layer_id in range(min(config["num_hash_layers"], config["num_hidden_layers"])):
             expected = reader.get_tensor(f"layers.{layer_id}.ffn.gate.tid2eid")[token_ids].numpy()
             np.testing.assert_array_equal(routes[:, layer_id], expected)
         print(f"routed_experts={routes.shape} hash_layers=matched")

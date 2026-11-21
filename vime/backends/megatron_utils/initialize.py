@@ -6,6 +6,7 @@ import torch
 from megatron.core import mpu, tensor_parallel
 from megatron.core.config import set_experimental_flag
 from megatron.core.num_microbatches_calculator import init_num_microbatches_calculator
+from megatron.training import global_vars
 from megatron.training.global_vars import _build_tokenizer, set_args
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,10 @@ def _initialize_distributed(args, get_embedding_ranks=None, get_position_embeddi
 
 def init(args):
     set_args(args)
+    if hasattr(global_vars, "set_run_config") and not global_vars.is_run_config_initialized():
+        from megatron.training.argument_utils import pretrain_cfg_container_from_args
+
+        global_vars.set_run_config(pretrain_cfg_container_from_args(args))
     if args.enable_experimental:
         logger.info("Enable megatron experimental")
         set_experimental_flag(True)
