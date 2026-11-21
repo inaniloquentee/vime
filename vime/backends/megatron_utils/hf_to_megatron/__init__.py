@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from transformers import AutoConfig
+from vime.backends.megatron_utils.deepseek_v4_weights import deepseek_v4_hf_tensor
 
 from .common import load_model_hf_weights
 from .deepseek import deepseek_hf_tensor
@@ -11,6 +12,7 @@ from .qwen3_next import qwen3_next_hf_tensor
 from .qwen3_omni import qwen3_omni_hf_tensor
 
 _LOADERS = {
+    "deepseek_v4": deepseek_v4_hf_tensor,
     "deepseek_v3": deepseek_hf_tensor,
     "deepseek_v32": deepseek_hf_tensor,
     "glm4": glm4_hf_tensor,

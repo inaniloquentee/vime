@@ -189,10 +189,9 @@ def named_params_and_buffers(args: Namespace, model: Sequence[torch.nn.Module]) 
             else:
                 yield f"{prefix}decoder.layers.{layer_idx}.{rest}", param
 
-        # treat expert bias as normal parameters
+        # Keep persistent routing buffers in HF loads and online weight updates.
         for name, buffer in model_module.named_buffers():
-            # TODO shall we handle (almost) all buffers
-            if "expert_bias" not in name:
+            if not name.endswith((".router.expert_bias", ".router.tid2eid")):
                 continue
             # for model without ddp wrap
             if not name.startswith("module.module."):
@@ -282,14 +281,57 @@ class VimeRayWeightSyncClient:
         ray.get([engine.finish_weight_update.remote(weight_version=version) for engine in self.engines])
 
 
+class _NCCLTrainerCompat:
+    """Small adapter for vLLM releases before/after the trainer factory API."""
+
+    def __init__(self, group, client, source, rank):
+        self.group = group
+        self.client = client
+        self.source = source
+        self.rank = rank
+
+    def send_weights(self):
+        metadata = self.source.metadata()
+        update_info = {
+            "names": [item.name for item in metadata],
+            "dtype_names": [str(item.dtype).replace("torch.", "") for item in metadata],
+            "shapes": [list(item.shape) for item in metadata],
+            "packed": True,
+        }
+        if self.rank == 0:
+            import threading
+
+            self.client.start_weight_update()
+            update_request = threading.Thread(target=self.client.update_weights, args=(update_info,))
+            update_request.start()
+        dist.barrier(group=get_gloo_group())
+        if self.rank == 0:
+            from vllm.distributed.weight_transfer.nccl_engine import (
+                NCCLTrainerSendWeightsArgs,
+                NCCLWeightTransferEngine,
+            )
+
+            NCCLWeightTransferEngine.trainer_send_weights(
+                iter(self.source),
+                NCCLTrainerSendWeightsArgs(group=self.group, packed=True),
+            )
+            update_request.join()
+            self.client.finish_weight_update()
+        else:
+            for _ in self.source:
+                pass
+        dist.barrier(group=get_gloo_group())
+
+    def shutdown(self):
+        self.group = None
+
+
 def create_nccl_trainer(
     client: VimeRayWeightSyncClient,
     source: HfWeightSource,
     engine_gpu_counts: Sequence[int],
 ):
     import ray
-    from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
-    from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
 
     rendezvous = [None]
     if dist.get_rank() == 0:
@@ -298,11 +340,48 @@ def create_nccl_trainer(
             rendezvous[0] = (ray._private.services.get_node_ip_address(), sock.getsockname()[1])
     dist.broadcast_object_list(rendezvous, src=0, group=get_gloo_group())
     master_address, master_port = rendezvous[0]
+    world_size = sum(engine_gpu_counts) + 1
+
+    try:
+        from vllm.distributed.weight_transfer.factory import WeightTransferTrainerFactory
+        from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
+    except ImportError:
+        from vllm.distributed.weight_transfer.nccl_common import NCCLWeightTransferInitInfo, trainer_init
+
+        if dist.get_rank() == 0:
+            import threading
+
+            worker_init = threading.Thread(
+                target=client.init_weight_transfer_engine,
+                args=(
+                    {
+                        "master_address": master_address,
+                        "master_port": master_port,
+                        "rank_offset": 1,
+                        "world_size": world_size,
+                    },
+                ),
+            )
+            worker_init.start()
+            group = trainer_init(
+                NCCLWeightTransferInitInfo(
+                    master_address=master_address,
+                    master_port=master_port,
+                    rank_offset=0,
+                    world_size=world_size,
+                )
+            )
+            worker_init.join()
+        else:
+            group = None
+        dist.barrier(group=get_gloo_group())
+        return _NCCLTrainerCompat(group, client, source, dist.get_rank())
+
     return WeightTransferTrainerFactory.trainer_init(
         NCCLTrainerInitInfo(
             master_address=master_address,
             master_port=master_port,
-            world_size=sum(engine_gpu_counts) + 1,
+            world_size=world_size,
             rank=dist.get_rank(),
             packed_num_buffers=1,
         ),

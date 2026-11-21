@@ -1,5 +1,8 @@
+import os
 import ast
 import logging
+
+import torch
 
 from megatron.training.arguments import parse_args as _megatron_parse_args
 from megatron.training.arguments import validate_args as _megatron_validate_args
@@ -149,8 +152,15 @@ def _hf_validate_args(args, hf_config):
 
 
 def _set_default_megatron_args(args):
+    # Native V4 defaults to cuDNN during TransformerConfig validation.
+    if (
+        torch.version.hip is not None
+        and getattr(args, "experimental_attention_variant", None) == "dsv4_hybrid"
+        and getattr(args, "dsa_kernel_backend", None) is None
+    ):
+        args.dsa_kernel_backend = "none"
     # always use zero optimizer
-    args.use_distributed_optimizer = True
+    args.use_distributed_optimizer = not bool(os.environ.get("VIME_FORCE_NO_DISTRIBUTED_OPTIMIZER"))
     if not hasattr(args, "enable_gloo_process_groups"):
         args.enable_gloo_process_groups = True
     # TODO: maybe change this after megatron has good fp8 support

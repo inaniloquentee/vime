@@ -40,6 +40,49 @@ from .stateless_adam import StatelessAdam
 logger = logging.getLogger(__name__)
 
 
+def _disable_optimizer_grad_norm(optimizer) -> None:
+    """Avoid the HIP grad-norm reduction that crashes on MI300X.
+
+    This opt-in workaround also disables gradient clipping for the affected
+    optimizer path until the upstream Megatron reduction is fixed.
+    """
+    if optimizer is None:
+        return
+
+    from megatron.core.optimizer.optimizer import ChainedOptimizer
+
+    def zero_grad_norm(*_args, **_kwargs):
+        return 0.0
+
+    for optimizer_type in (ChainedOptimizer, MegatronOptimizer):
+        if hasattr(optimizer_type, "get_grad_norm"):
+            optimizer_type.get_grad_norm = zero_grad_norm
+
+    seen = set()
+    patched = []
+
+    def visit(value, path):
+        if value is None or id(value) in seen:
+            return
+        seen.add(id(value))
+        if hasattr(value, "get_grad_norm"):
+            try:
+                value.get_grad_norm = zero_grad_norm
+            except (AttributeError, TypeError):
+                pass
+            patched.append(f"{path}:{type(value).__name__}")
+        for attr in ("chained_optimizers", "optimizer", "optimizers", "optimizer_instance"):
+            child = getattr(value, attr, None)
+            if isinstance(child, (list, tuple)):
+                for index, item in enumerate(child):
+                    visit(item, f"{path}.{attr}[{index}]")
+            else:
+                visit(child, f"{path}.{attr}")
+
+    visit(optimizer, "optimizer")
+    logger.warning("[ROCm] disabled optimizer grad norm for %s", ", ".join(patched))
+
+
 def _disable_tqdm_for_non_main_rank() -> bool:
     return not (
         mpu.get_data_parallel_rank(with_context_parallel=True) == 0
@@ -317,6 +360,8 @@ def setup_model_and_optimizer(
         )
     if args.use_stateless_adam:
         _disable_distributed_optimizer_state_initialization(optimizer)
+    if os.environ.get("VIME_SKIP_GRAD_NORM") and optimizer is not None:
+        _disable_optimizer_grad_norm(optimizer)
     opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
     return model, optimizer, opt_param_scheduler
 
@@ -1027,13 +1072,9 @@ def initialize_model_and_optimizer(
             DDP-wrapped model chunks, optimizer, scheduler, and iteration index.
     """
 
-    if torch.version.hip:
-        import megatron.core.dist_checkpointing.strategies.filesystem_async as filesystem_async_module
+    from vime.utils.rocm_checkpoint_writer import patch_rocm_checkpoint_writer
 
-        from vime.utils.rocm_checkpoint_writer import ROCmFileSystemWriterAsync
-
-        filesystem_async_module.FileSystemWriterAsync = ROCmFileSystemWriterAsync
-        print("[ROCm] Applied FileSystemWriterAsync patch for HIP compatibility")
+    patch_rocm_checkpoint_writer()
 
     model, optimizer, opt_param_scheduler = setup_model_and_optimizer(args, role)
     model[0].role = role
