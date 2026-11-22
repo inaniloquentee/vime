@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from transformers import AutoConfig
 from vime.backends.megatron_utils.deepseek_v4_weights import deepseek_v4_hf_tensor
+from vime.utils.hf_config import load_hf_config
 
 from .common import load_model_hf_weights
 from .deepseek import deepseek_hf_tensor
@@ -13,6 +13,8 @@ from .qwen3_omni import qwen3_omni_hf_tensor
 
 _LOADERS = {
     "deepseek_v4": deepseek_v4_hf_tensor,
+    "deepseek_v41": deepseek_v4_hf_tensor,
+    "deepseek_v41_text": deepseek_v4_hf_tensor,
     "deepseek_v3": deepseek_hf_tensor,
     "deepseek_v32": deepseek_hf_tensor,
     "glm4": glm4_hf_tensor,
@@ -35,12 +37,12 @@ _LOADERS = {
 
 
 def supports_hf_weight_loading(path: str | Path) -> bool:
-    config = AutoConfig.from_pretrained(path, trust_remote_code=True)
+    config = load_hf_config(path, trust_remote_code=True)
     return config.model_type in _LOADERS
 
 
 def load_hf_weights(args, model, path: str | Path) -> None:
-    config = AutoConfig.from_pretrained(path, trust_remote_code=True)
+    config = load_hf_config(path, trust_remote_code=True)
     try:
         get_hf_tensor = _LOADERS[config.model_type]
     except KeyError as exc:

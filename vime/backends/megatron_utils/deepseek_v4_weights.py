@@ -1,4 +1,4 @@
-"""DeepSeek-V4-Flash checkpoint names shared by load and rollout weight sync."""
+"""DeepSeek V4/V4.1 checkpoint names shared by load and rollout weight sync."""
 
 from __future__ import annotations
 
@@ -37,6 +37,11 @@ _LAYER = {
     "self_attention.core_attention.indexer.compressor.linear_wkv.weight": "attn.indexer.compressor.wkv.weight",
     "self_attention.core_attention.indexer.compressor.linear_wgate.weight": "attn.indexer.compressor.wgate.weight",
     "self_attention.core_attention.indexer.compressor.norm.weight": "attn.indexer.compressor.norm.weight",
+    "self_attention.core_attention.indexer.linear_wk.weight": "attn.indexer.wk.weight",
+    "self_attention.core_attention.indexer.k_norm.weight": "attn.indexer.k_norm.weight",
+    "v41_engram.linear_wkv.weight": "engram.wkv.weight",
+    "v41_engram.q_weight": "engram.q_weight",
+    "v41_engram.k_weight": "engram.k_weight",
     "mlp.router.weight": "ffn.gate.weight",
     "mlp.router.expert_bias": "ffn.gate.bias",
     "mlp.router.tid2eid": "ffn.gate.tid2eid",
@@ -131,6 +136,8 @@ def convert_deepseek_v4_to_hf(args, name: str, parameter: torch.Tensor) -> list[
 def quantize_deepseek_v4_weights(named_tensors, quantization_config):
     if not quantization_config or quantization_config.get("quant_method") not in {"fp8", "deepseek_v4_fp8"}:
         return named_tensors
+    if quantization_config.get("expert_dtype") == "fp4":
+        raise ValueError("V4.1 online weight sync requires a BF16 HF checkpoint; native FP4 refit is not supported")
     from vime.backends.megatron_utils.vllm import quant_weight_ue8m0
 
     block_size = quantization_config["weight_block_size"]

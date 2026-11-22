@@ -131,3 +131,53 @@ The isolated C4/hash and C128/learned layers also pass forward/backward.
 vLLM generates four tokens with logprobs and returns `(8, 4, 6)` routes;
 all three hash layers match the checkpoint tables. The RL gates above remain
 open; these are model and rollout checks, not an end-to-end GRPO run.
+
+
+## DeepSeek V4.1 (experimental, optional runtime)
+
+V4.1 is not an alias for V4: it adds cross-layer KV/index reuse, shifted mHC
+and Engram. Vime reuses the [Miles V4.1 spec](https://github.com/radixark/miles/pull/3179)
+through its existing `--spec` hook instead of copying model or kernel files.
+Vime still owns the actor, optimizer, checkpoint loading, and vLLM rollout.
+The shared V4 converter also maps V4.1 indexer projections and trainable Engram
+weights; frozen Engram tables are loaded by the upstream plugin from the HF source.
+
+This is an **optional dependency**, including Miles' kernels and Megatron fork,
+not a dependency of the existing V4 recipe. Reference source pins:
+
+| Component | Revision |
+|---|---|
+| `radixark/miles` | `9011e812d091a7bbc57d508898b93a081f2497d0` |
+| `radixark/Megatron-LM` (`miles-main`) | `8e43d38528aac22fef29d30db7a709041bf257cc` |
+| TileKernels | `1.0.0` |
+
+Use a Miles-compatible training environment (including TileLang, Transformer
+Engine and the Miles kernels), expose these two source checkouts on `PYTHONPATH`,
+and install a vLLM build that recognizes `DeepseekV41ForCausalLM`. Vime's V4
+CUDA/ROCm image pins alone do not provide this runtime.
+
+```bash
+export PYTHONPATH=/path/to/vime:/path/to/Megatron-LM:/path/to/miles:$PYTHONPATH
+# Example BF16 reduced checkpoint used by Miles' CI; includes ratios 0/2/1.
+export DSV41_CHECKPOINT=/path/to/DeepSeek-V4.1-4layer
+source scripts/models/deepseek-v4.1-flash.sh
+# Append the usual Vime data, GRPO and GPU placement arguments.
+python train.py "${MODEL_ARGS[@]}" --hf-checkpoint "$DSV41_CHECKPOINT" \
+  --load "$DSV41_CHECKPOINT" --tensor-model-parallel-size 1 \
+  --pipeline-model-parallel-size 1 --context-parallel-size 1
+```
+
+The recipe reads model dimensions and compression ratios from the checkpoint,
+so the reduced fixture uses its own `[0, 2, 1, 1]` topology rather than V4's
+`[0, 0, 4, 128]`. A flattened BF16 checkpoint or the official composite config
+is recognized without globally overriding Transformers' config registration.
+The original FP4-expert/FP8 release needs conversion to BF16 train/rollout
+weights first; keep the frozen Engram tables in their original FP8/E8M0 format.
+Native FP4 online refit is rejected rather than exported as FP8 by mistake.
+
+Initial boundaries: text only, MTP/DSpark disabled, CP=1 and PP=1. Keep vLLM
+resident (`--offload-rollout` and vLLM sleep mode are rejected), because frozen
+Engram tables are not in online weight updates. Use distributed training
+checkpoints and retain the original HF directory; `--save-hf` is rejected until
+frozen-table export is implemented. V4's 50-step MI300X result does not validate
+V4.1: V4.1 forward/backward, publication parity, resume and GRPO remain GPU gates.
