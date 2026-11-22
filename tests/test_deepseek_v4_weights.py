@@ -41,6 +41,14 @@ class Reader:
             "layers.3.attn.indexer.compressor.wkv.weight",
         ),
         ("decoder.layers.42.mlp.router.expert_bias", "layers.42.ffn.gate.bias"),
+        ("decoder.layers.2.self_attention.core_attention.indexer.linear_wk.weight", "layers.2.attn.indexer.wk.weight"),
+        (
+            "decoder.layers.2.self_attention.core_attention.indexer.k_norm.weight",
+            "layers.2.attn.indexer.k_norm.weight",
+        ),
+        ("decoder.layers.1.v41_engram.linear_wkv.weight", "layers.1.engram.wkv.weight"),
+        ("decoder.layers.1.v41_engram.q_weight", "layers.1.engram.q_weight"),
+        ("decoder.layers.1.v41_engram.k_weight", "layers.1.engram.k_weight"),
     ],
 )
 def test_native_v4_names_round_trip(mcore, checkpoint):
@@ -239,3 +247,20 @@ def test_local_fp8_weight_decoding():
     with safe_open(path / index[expert_name], framework="pt", device="cpu") as tensors:
         assert tensors.get_slice(expert_name).get_dtype() == "F8_E4M3"
         assert tensors.get_slice(expert_name.removesuffix(".weight") + ".scale").get_dtype() == "F32"
+
+
+def test_v41_bf16_export_reuses_v4_converter():
+    from vime.backends.megatron_utils.megatron_to_hf import convert_to_hf
+
+    weight = torch.randn(4, 8, dtype=torch.bfloat16)
+    args = SimpleNamespace(vocab_size=129280)
+    name, actual = convert_to_hf(args, "DeepSeek-V4.1", "module.module.decoder.layers.1.v41_engram.q_weight", weight)[
+        0
+    ]
+    assert name == "layers.1.engram.q_weight"
+    assert actual is weight
+
+
+def test_v41_native_fp4_refit_is_rejected():
+    with pytest.raises(ValueError, match="native FP4 refit"):
+        quantize_deepseek_v4_weights([], {"quant_method": "fp8", "expert_dtype": "fp4"})

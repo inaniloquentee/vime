@@ -383,6 +383,8 @@ def test_loader_scope_stays_explicit():
         "deepseek_v3",
         "deepseek_v32",
         "deepseek_v4",
+        "deepseek_v41",
+        "deepseek_v41_text",
         "glm4",
         "glm4_moe",
         "glm4_moe_lite",
