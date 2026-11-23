@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
-# Optional Miles/Megatron runtime; BF16 text training, MTP/DSpark disabled.
+# Vime-native DeepSeek V4.1 runtime; BF16 text training, MTP/DSpark disabled.
 # Supply --hf-checkpoint "$DSV41_CHECKPOINT" to train.py as well.
 : "${DSV41_CHECKPOINT:?Set DSV41_CHECKPOINT to a local BF16 V4.1 checkpoint}"
 source "$(dirname "${BASH_SOURCE[0]}")/deepseek-v4-flash.sh"
-readarray -t MODEL_ARGS < <(python - "$DSV41_CHECKPOINT" "${MODEL_ARGS[@]}" <<'PY'
+readarray -t MODEL_ARGS < <(python3 - "$DSV41_CHECKPOINT" "${MODEL_ARGS[@]}" <<'PY'
 import sys
 from vime.utils.hf_config import load_hf_config
 
@@ -27,7 +27,7 @@ replacements = {
     "--moe-ffn-hidden-size": hf.moe_intermediate_size,
     "--moe-shared-expert-intermediate-size": hf.moe_intermediate_size * hf.n_shared_experts,
 }
-# The Miles Megatron fork uses the earlier names of these shared V4 flags.
+# The V4.1 Megatron fork uses the earlier names of these shared V4 flags.
 renames = {
     "--output-projection-groups": "--o-groups",
     "--output-projection-lora-rank": "--o-lora-rank",

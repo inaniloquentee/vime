@@ -31,6 +31,7 @@ from vime.utils.reloadable_process_group import (
 )
 from vime.utils.routing_replay import RoutingReplay
 from vime.utils.types import RolloutBatch
+from vime.utils.processing_utils import tokenizer_path_from_args
 
 from ...utils.tensor_backper import TensorBackuper
 from .checkpoint import load_checkpoint
@@ -87,7 +88,9 @@ class MegatronTrainRayActor(TrainRayActor):
         for i in range(args.num_gpus_per_node):
             if i == dist.get_rank() % args.num_gpus_per_node:
                 self.hf_config = load_hf_config(args.hf_checkpoint, trust_remote_code=True)
-                self.tokenizer = AutoTokenizer.from_pretrained(self.args.hf_checkpoint, trust_remote_code=True)
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    tokenizer_path_from_args(self.args), trust_remote_code=True
+                )
             dist.barrier(group=get_gloo_group())
 
         dist.barrier(group=get_gloo_group())

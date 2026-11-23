@@ -15,6 +15,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_PATCH_SIZE = 14
 
 
+def tokenizer_path_from_args(args):
+    """Return an explicit rollout tokenizer before falling back to the checkpoint."""
+    return (
+        getattr(args, "vllm_tokenizer", None)
+        or getattr(args, "tokenizer_model", None)
+        or args.hf_checkpoint
+    )
+
+
 def load_tokenizer(name_or_path: str, **kwargs):
     tokenizer = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
     template_path = Path(name_or_path) / "chat_template.json"

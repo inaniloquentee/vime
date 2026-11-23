@@ -100,7 +100,12 @@ def _run_vllm_server(kwargs: dict, env: dict) -> None:
     except ModuleNotFoundError as exc:
         if exc.name not in {"vllm.entrypoints.launchers", "vllm.entrypoints.launchers.cli_args"}:
             raise
-        from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+        try:
+            from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+        except ModuleNotFoundError as exc:
+            if exc.name not in {"vllm.entrypoints.openai", "vllm.entrypoints.openai.cli_args"}:
+                raise
+            from vllm.entrypoints.common.cli_args import make_arg_parser, validate_parsed_serve_args
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     ns = argparse.Namespace(**kwargs)

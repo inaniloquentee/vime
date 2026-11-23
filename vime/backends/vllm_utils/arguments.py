@@ -12,7 +12,12 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name not in {"vllm.entrypoints.launchers", "vllm.entrypoints.launchers.cli_args"}:
         raise
-    from vllm.entrypoints.openai.cli_args import FrontendArgs
+    try:
+        from vllm.entrypoints.openai.cli_args import FrontendArgs
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"vllm.entrypoints.openai.cli_args", "vllm.entrypoints.openai"}:
+            raise
+        from vllm.entrypoints.common.cli_args import FrontendArgs
 
 
 logger = logging.getLogger(__name__)

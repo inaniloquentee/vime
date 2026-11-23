@@ -30,6 +30,7 @@ from vime.utils.processing_utils import (
     build_processor_kwargs,
     load_processor,
     load_tokenizer,
+    tokenizer_path_from_args,
 )
 from vime.utils.types import Sample
 
@@ -150,7 +151,7 @@ class GenerateState(metaclass=SingletonMeta):
     def __init__(self, args: Namespace) -> None:
         # persistent state for the generation process
         self.args = args
-        self.tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
+        self.tokenizer = load_tokenizer(tokenizer_path_from_args(args), trust_remote_code=True)
         self.processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
         self.semaphore = asyncio.Semaphore(args.vllm_server_concurrency * get_rollout_num_engines(args))
