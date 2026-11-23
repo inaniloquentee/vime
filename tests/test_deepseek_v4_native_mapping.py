@@ -149,12 +149,12 @@ def test_v41_adapter_delegates_without_mutating_shared_args(tmp_path, monkeypatc
     args = SimpleNamespace(hf_checkpoint=str(tmp_path), mtp_num_layers=0)
     config = SimpleNamespace(experimental_attention_variant="dsv4")
     captured = []
-    module = types.ModuleType("miles_plugins.models.deepseek_v4_1.deepseek_v4_1")
+    module = types.ModuleType("vime_plugins.models.deepseek_v41.deepseek_v41")
     module.get_dsv41_spec = lambda *values: captured.append(values) or "spec"
     monkeypatch.setitem(sys.modules, module.__name__, module)
     assert get_dsv41_spec(args, config) == "spec"
     forwarded = captured[0][0]
-    assert forwarded.dsv4_impl == "miles" and forwarded.miles_dsa_topk_backend == "torch"
+    assert forwarded.dsv4_impl == "vime" and forwarded.vime_dsa_topk_backend == "torch"
     assert not hasattr(args, "dsv4_impl")
     assert config.activation_func_clamp_shared_expert
 
@@ -166,7 +166,7 @@ def test_v41_rejects_native_quantized_checkpoint():
         validate_dsv41_args(SimpleNamespace(), SimpleNamespace(quantization_config={"expert_dtype": "fp4"}))
 
 
-@pytest.mark.skipif(not os.environ.get("DSV41_CHECKPOINT"), reason="Optional Miles runtime/checkpoint required")
+@pytest.mark.skipif(not os.environ.get("DSV41_CHECKPOINT"), reason="Optional VIME runtime/checkpoint required")
 def test_v41_real_recipe_builds_upstream_layer_spec():
     import argparse
     import subprocess

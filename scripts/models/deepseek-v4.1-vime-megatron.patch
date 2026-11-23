@@ -1,0 +1,125 @@
+diff --git a/megatron/core/extensions/transformer_engine.py b/megatron/core/extensions/transformer_engine.py
+index c081fa9d1..5f1364dfd 100644
+--- a/megatron/core/extensions/transformer_engine.py
++++ b/megatron/core/extensions/transformer_engine.py
+@@ -2357,14 +2357,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
+         def _get_weight_tensors(self):
+             """Get the weight tensors of the module."""
+             weight_tensors = super()._get_weight_tensors()
+-            if self.config.moe_expert_fake_quant == "mxfp4":
+-                from miles.utils.mxfp4_fake_qat import fake_quantize_mxfp4_weight_tensors
+-
+-                weight_tensors = fake_quantize_mxfp4_weight_tensors(self, weight_tensors)
+-            if os.getenv("OPEN_TRAINING_NVFP4_FAKE_QAT_FLAG", "0") == "1":
+-                from miles.utils.nvfp4_fake_qat import maybe_fake_quantize_nvfp4_weight_tensors
+-
+-                weight_tensors = maybe_fake_quantize_nvfp4_weight_tensors(weight_tensors)
++            # Vime V4.1 uses BF16 weights; optional Miles-only FP4 QAT hooks are omitted.
+             return maybe_fake_quantize_int4_weight_tensors(
+                 self.config, self.delay_wgrad_compute, weight_tensors
+             )
+diff --git a/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py b/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
+index 707d0edb2..0420a9b48 100644
+--- a/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
++++ b/megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py
+@@ -118,10 +118,6 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
+     def _register_param_copy_back_gpu_hook(self):
+         def param_copy_back_gpu_hook_closure():
+             def param_copy_back_gpu_hook(optimizer, args, kwargs):
+-                if os.getenv("OPEN_TRAINING_BF16_STOCHASTIC_ROUNDING_FLAG", "0") == "1":
+-                    from miles.utils.bf16_stochastic_rounding import stochastic_round_copy_back
+-
+-                    return stochastic_round_copy_back(self, optimizer)
+                 self._h2d_stream.wait_stream(torch.cuda.current_stream())
+                 with torch.cuda.stream(self._h2d_stream):
+                     for param in _param_generator(optimizer):
+@@ -133,10 +129,6 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
+
+         def fp32_param_copy_back_gpu_hook_closure():
+             def fp32_param_copy_back_gpu_hook(optimizer, args, kwargs):
+-                if os.getenv("OPEN_TRAINING_BF16_STOCHASTIC_ROUNDING_FLAG", "0") == "1":
+-                    from miles.utils.bf16_stochastic_rounding import stochastic_round_copy_back
+-
+-                    return stochastic_round_copy_back(self, optimizer)
+                 for group in self.param_groups:
+                     for param in group["params"]:
+                         if param in self.gpu_params_map_cpu_copy:
+diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
+index 635b94b68..4519afff4 100644
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -2963,10 +2963,6 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                     if self._is_distopt_quantized_param(model_param) or is_nvfp4tensor(model_param):
+                         # Quantized params are handled above.
+                         continue
+-                    elif os.getenv("OPEN_TRAINING_BF16_STOCHASTIC_ROUNDING_FLAG", "0") == "1":
+-                        from miles.utils.bf16_stochastic_rounding import stochastic_round_main_param
+-
+-                        stochastic_round_main_param(self, shard_main_param, shard_model_param)
+                     else:
+                         shard_model_param.data.copy_(shard_main_param)
+
+diff --git a/megatron/core/transformer/moe/moe_utils.py b/megatron/core/transformer/moe/moe_utils.py
+index ba218b9b6..979a4763d 100644
+--- a/megatron/core/transformer/moe/moe_utils.py
++++ b/megatron/core/transformer/moe/moe_utils.py
+@@ -799,21 +799,21 @@ def topk_routing_with_score_function(
+             # and therefore whose last ulp -- follows the order topk returns them in.
+             return torch.topk(scores, k=topk, dim=1)
+
+-    # miles rollout routing replay (R3): replays sglang rollout routing in the training
++    # VIME routing replay (R3): replays sglang rollout routing in the training
+     # engine. This is miles' own mechanism and must take precedence — it is the active
+     # path during miles training. MTP layers bypass R3. NVIDIA's inference-time
+     # router_replay (megatron's own generation) is a separate pipeline used only when
+-    # the miles manager is not active, so it can never shadow R3.
+-    from miles.utils.replay_base import routing_replay_manager
++    # the VIME manager is not active, so it can never shadow R3.
++    from vime_plugins.models.deepseek_v4_kernels.replay import routing_replay_manager
+
+     if not is_mtp:
+-        _miles_topk = routing_replay_manager.get_topk_fn(_compute_topk, return_probs=True)
++        _vime_topk = routing_replay_manager.get_topk_fn(_compute_topk, return_probs=True)
+     else:
+-        _miles_topk = _compute_topk
++        _vime_topk = _compute_topk
+
+     def compute_topk(scores, topk, num_groups=None, group_topk=None):
+         if not is_mtp and routing_replay_manager.enabled:
+-            return _miles_topk(scores, topk, num_groups, group_topk)
++            return _vime_topk(scores, topk, num_groups, group_topk)
+         if router_replay is not None:
+             return router_replay.get_replay_topk(
+                 scores, topk, num_groups, group_topk, _compute_topk
+diff --git a/megatron/core/transformer/moe/router.py b/megatron/core/transformer/moe/router.py
+index 74b09bfa9..1bc888e7f 100644
+--- a/megatron/core/transformer/moe/router.py
++++ b/megatron/core/transformer/moe/router.py
+@@ -275,10 +275,10 @@ class TopKRouter(Router):
+         if self.config.moe_enable_routing_replay:
+             self.router_replay = RouterReplay()
+
+-        # miles rollout routing replay (R3): register this router so the miles
++        # VIME routing replay (R3): register this router so the miles
+         # routing_replay_manager can record/replay sglang rollout routing during
+         # training. No-op (early return) unless miles enables the manager.
+-        from miles.utils.replay_base import routing_replay_manager
++        from vime_plugins.models.deepseek_v4_kernels.replay import routing_replay_manager
+
+         # replay only records main-decoder MoE layers; an MTP router would pop from an empty stream
+         if not self.is_mtp_layer:
+diff --git a/megatron/training/training.py b/megatron/training/training.py
+index d64ae8402..17e12cb45 100644
+--- a/megatron/training/training.py
++++ b/megatron/training/training.py
+@@ -2242,9 +2242,8 @@ def get_model(
+     # After TE2.x: Below function is an empty function and does nothing.
+     correct_amax_history_if_needed(model)
+
+-    # Miles allows selected parameters to opt out of Float16Module's global
+-    # bf16/fp16 cast. Restore those dtypes immediately after model materialization.
+-    from miles.backends.megatron_utils.fp32_param_utils import enforce_marked_param_dtypes
++    # Restore Vime-marked parameter dtypes after Float16Module materialization.
++    from vime_plugins.models.deepseek_v4_ops.param_dtype import enforce_marked_param_dtypes
+
+     enforce_marked_param_dtypes(model)

@@ -8,7 +8,7 @@ import torch
 
 from vime.utils.data import Dataset
 from vime.utils.misc import load_function
-from vime.utils.processing_utils import load_processor, load_tokenizer
+from vime.utils.processing_utils import load_processor, load_tokenizer, tokenizer_path_from_args
 from vime.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ class RolloutDataSource(DataSource):
         self.metadata = {}
 
         if args.rollout_global_dataset and args.prompt_data is not None:
-            tokenizer = load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
+            tokenizer = load_tokenizer(tokenizer_path_from_args(args), trust_remote_code=True)
             processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
 
             # TODO move (during the refactor)

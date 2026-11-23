@@ -59,7 +59,7 @@ def validate_dsv41_args(args, hf):
 
 
 def get_dsv41_spec(args, config, vp_stage=None):
-    """Reuse Miles' V4.1 layer spec; Vime still owns training and weight sync."""
+    """Use VIME's native V4.1 layer spec and VIME-owned training and weight sync."""
     from copy import copy
 
     from vime.utils.hf_config import load_hf_config
@@ -69,17 +69,11 @@ def get_dsv41_spec(args, config, vp_stage=None):
         raise ValueError("DeepSeek V4.1 requires a deepseek_v41 HF checkpoint")
     validate_dsv41_args(args, hf)
     if config.experimental_attention_variant != "dsv4":
-        raise ValueError("DeepSeek V4.1 requires the Miles Megatron fork and --experimental-attention-variant dsv4")
-    try:
-        from miles_plugins.models.deepseek_v4_1.deepseek_v4_1 import get_dsv41_spec as miles_spec
-    except ModuleNotFoundError as exc:
-        if exc.name not in {"miles", "miles_plugins"}:
-            raise
-        raise ImportError(
-            "Install the optional Miles V4.1 runtime described in examples/README-deepseek-v4.md"
-        ) from exc
+        raise ValueError("DeepSeek V4.1 requires the V4.1 Megatron fork and --experimental-attention-variant dsv4")
+    from vime_plugins.models.deepseek_v41.deepseek_v41 import get_dsv41_spec as vime_spec
+
     args = copy(args)
-    args.dsv4_impl = "miles"
-    args.miles_dsa_topk_backend = "torch"
+    args.dsv4_impl = "vime"
+    args.vime_dsa_topk_backend = "torch"
     config.activation_func_clamp_shared_expert = True
-    return miles_spec(args, config, vp_stage)
+    return vime_spec(args, config, vp_stage)
